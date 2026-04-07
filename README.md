@@ -1,19 +1,25 @@
 # neural-net
 
-Small feed-forward neural network package with three layers of functionality:
+Small feed-forward neural network package with two training backends:
 
-- `neural_net.backend`: the raw FFNN implementation and math helpers
-- `neural_net.training`: a higher-level training API for datasets and scalar functions
+- `neural_net.backend` and `neural_net.training`: the original scalar reference implementation
+- `neural_net.accelerated`: a batched high-throughput backend with NumPy kernels and an optional Numba runtime
 - `neural_net.demo`: the interactive `sin(x)` demo with milestone snapshots on a slider
 
-The project is packaged for `uv`, so it can be run locally as a script or imported elsewhere as a module.
+The reference path stays intact for experimentation and teaching. The accelerated path is the one to use when throughput matters.
 
 ## Setup
 
-Install the environment and dependencies:
+Install the base environment:
 
 ```bash
 uv sync
+```
+
+To enable the optional compiled runtime for the accelerated backend, install the accelerated extra:
+
+```bash
+uv sync --extra accelerated
 ```
 
 Run the demo either through the compatibility wrapper or the package entrypoint:
@@ -27,151 +33,62 @@ uv run neural-net-demo
 
 The demo trains a small network to approximate `sin(x)` on `[-pi, pi]`.
 
-It:
-
-- builds a random `1 -> 32 -> 32 -> 1` network
-- trains for milestone counts `2^n`
-- evaluates the network on a dense grid
-- opens a Matplotlib plot with a slider at the bottom
-- saves the current figure to `sin_learning_milestones.png`
-
-Useful commands:
+Reference backend:
 
 ```bash
-uv run learn_function_demo.py
-uv run learn_function_demo.py --verbose
-uv run learn_function_demo.py --runs 12
-uv run neural-net-demo --verbose --runs 15
+uv run neural-net-demo --backend reference --runs 15
+```
+
+Accelerated backend with batched NumPy:
+
+```bash
+uv run neural-net-demo --backend accelerated --runtime numpy --batch-size 256 --runs 15
+```
+
+Accelerated backend with automatic runtime selection:
+
+```bash
+uv run neural-net-demo --backend accelerated --runtime auto --batch-size 256 --runs 15
 ```
 
 CLI options:
 
-- `-v`, `--verbose`: print milestone progress during training without blocking the hot loop
+- `-v`, `--verbose`: print milestone progress during training
 - `-n`, `--runs`: choose the largest exponent `n`; training records snapshots at `2^0, 2^1, ..., 2^n`
+- `--backend`: choose `reference` or `accelerated`
+- `--runtime`: choose `auto`, `numpy`, or `numba` for the accelerated backend
+- `--batch-size`: mini-batch size for accelerated training
 
-Example:
-
-- `--runs 6` records snapshots after `1, 2, 4, 8, 16, 32, 64` updates
-- `--runs 12` records snapshots up to `4096` updates
-
-## Demo Configuration
-
-The current demo configuration lives in `neural_net/demo.py`.
-
-By default it uses:
-
-- activation: `ActivationFunc.tanh`
-- network shape: `(32, 32, 1)`
-- training config: `TrainingConfig(max_power=args.runs)`
-- target function: `np.sin`
-
-If you want different behavior, the simplest options are:
-
-- change the network shape passed to `build_random_network(...)`
-- change the activation function
-- change the target function from `np.sin` to another scalar function
-- change `TrainingConfig` values such as `learning_rate`, `max_power`, `evaluation_points`, or `seed`
+The saved plot still goes to `sin_learning_milestones.png`, and the accelerated demo annotates the chart with runtime and batch metadata.
 
 ## Package API
 
-Top-level imports are re-exported from `neural_net/__init__.py`, so the common API can be imported directly:
+Top-level imports are re-exported from `neural_net/__init__.py`:
 
 ```python
 from neural_net import (
+    AcceleratedFFNN,
+    AcceleratedRuntime,
+    AcceleratedTrainingConfig,
     ActivationFunc,
     FFNN,
     FFNNConfig,
     TrainingConfig,
     TrainingResult,
+    build_accelerated_network,
     build_random_network,
     fit_dataset,
+    fit_dataset_accelerated,
     fit_function,
+    fit_function_accelerated,
     predict_dataset,
+    predict_dataset_accelerated,
 )
 ```
 
-If you want lower-level control, import directly from `neural_net.backend` or `neural_net.training`.
+## Reference Backend
 
-## Use The Training Backend With Your Own Data
-
-Use `fit_dataset(...)` when you already have input/output samples.
-
-Expected shapes:
-
-- inputs: `(n_samples, input_dim)`
-- targets: `(n_samples, output_dim)`
-
-For scalar inputs or outputs, 1D arrays are also accepted and normalized internally.
-
-Example:
-
-```python
-import numpy as np
-
-from neural_net import TrainingConfig, build_random_network, fit_dataset, predict_dataset
-from neural_net.backend import ActivationFunc
-
-x_train = np.array([
-    [0.0, 0.0],
-    [0.0, 1.0],
-    [1.0, 0.0],
-    [1.0, 1.0],
-], dtype=float)
-
-y_train = np.array([
-    [0.0],
-    [1.0],
-    [1.0],
-    [0.0],
-], dtype=float)
-
-network = build_random_network(
-    input_layer_dim=2,
-    hidden_layer_shapes=(16, 16, 1),
-    activation=ActivationFunc.tanh,
-    seed=0,
-)
-
-result = fit_dataset(
-    network,
-    x_train,
-    y_train,
-    config=TrainingConfig(
-        learning_rate=0.02,
-        max_power=10,
-        evaluation_points=128,
-        seed=0,
-    ),
-)
-
-print(result.milestone_steps)
-print(result.losses)
-
-predictions = predict_dataset(network, x_train)
-print(predictions)
-```
-
-What `fit_dataset(...)` does:
-
-- samples one training row at a time
-- runs `fast_backward_pass(...)` on that sample
-- records predictions and loss at milestone steps `2^n`
-- returns a `TrainingResult`
-
-`TrainingResult` contains:
-
-- `evaluation_inputs`: the inputs used for milestone evaluation
-- `evaluation_targets`: the reference outputs for those inputs
-- `snapshots`: a dictionary `{step: predictions}`
-- `losses`: a dictionary `{step: mse}`
-- `network`: the trained network instance
-- `milestone_steps`: the tuple of recorded milestone counts
-
-## Train A Function f: R -> R
-
-Use `fit_function(...)` when your target is a scalar function and you want the trainer to sample from a domain.
-
-Example:
+Use the original backend when you want the simple scalar training path:
 
 ```python
 import numpy as np
@@ -189,55 +106,133 @@ network = build_random_network(
 result = fit_function(
     network,
     np.sin,
-    domain=(-np.pi, np.pi),
-    config=TrainingConfig(
-        learning_rate=0.02,
-        max_power=12,
-        evaluation_points=512,
-        seed=0,
-    ),
+    config=TrainingConfig(max_power=12, seed=0),
 )
-
-print(result.losses)
 ```
 
-Current `fit_function(...)` assumptions:
+This path performs one-sample updates and keeps the older `FFNN.fast_forward_pass(...)` and `FFNN.fast_backward_pass(...)` workflow unchanged.
 
-- input dimension must be `1`
-- output dimension must be `1`
-- the target function must accept NumPy inputs and return numeric outputs
+## Accelerated Backend
 
-## Use The Backend Directly
-
-If you want to bypass the training helpers and work directly with the network:
+Use the accelerated backend when you want vectorized training and inference:
 
 ```python
 import numpy as np
 
-from neural_net.backend import ActivationFunc, FFNN, FFNNConfig
-
-config = FFNNConfig(
-    input_layer_dim=1,
-    hidden_layer_count=3,
-    hidden_layer_shapes=(8, 8, 1),
-    activation_func=ActivationFunc.tanh,
+from neural_net import (
+    AcceleratedRuntime,
+    AcceleratedTrainingConfig,
+    ActivationFunc,
+    build_accelerated_network,
+    fit_function_accelerated,
 )
 
-network = FFNN(config)
-output = network.fast_forward_pass(np.array([0.5]))
-print(output)
+network = build_accelerated_network(
+    input_layer_dim=1,
+    hidden_layer_shapes=(32, 32, 1),
+    activation=ActivationFunc.tanh,
+    seed=0,
+    runtime=AcceleratedRuntime.auto,
+)
+
+result = fit_function_accelerated(
+    network,
+    np.sin,
+    config=AcceleratedTrainingConfig(
+        learning_rate=0.02,
+        max_power=12,
+        evaluation_points=512,
+        seed=0,
+        batch_size=256,
+        runtime=AcceleratedRuntime.auto,
+    ),
+)
 ```
 
-The training helpers are usually the better entrypoint unless you are experimenting with the network internals.
+Accelerated-path assumptions:
 
-## Reuse In Another Project
+- training uses mini-batch updates
+- milestone `updates` still mean optimizer steps, not individual samples
+- progress logs include batch size and total samples seen
+- `fit_function_accelerated(...)` requires a vectorized target function that accepts NumPy inputs and returns one scalar output per sample
 
-Because this is a normal Python package, you can install it into another environment and import from `neural_net`.
+## Dataset Training
 
-Within this repo, the main reusable modules are:
+Reference dataset training:
 
-- `neural_net/backend.py`
-- `neural_net/training.py`
-- `neural_net/demo.py`
+```python
+import numpy as np
 
-The top-level files `learn_function_demo.py`, `main.py`, and `training_framework.py` are compatibility wrappers rather than the primary implementation.
+from neural_net import TrainingConfig, build_random_network, fit_dataset, predict_dataset
+from neural_net.backend import ActivationFunc
+
+x_train = np.array([[0.0], [0.5], [1.0], [1.5]], dtype=float)
+y_train = np.sin(x_train)
+
+network = build_random_network(
+    input_layer_dim=1,
+    hidden_layer_shapes=(16, 16, 1),
+    activation=ActivationFunc.tanh,
+    seed=0,
+)
+
+result = fit_dataset(
+    network,
+    x_train,
+    y_train,
+    config=TrainingConfig(max_power=10, seed=0),
+)
+
+predictions = predict_dataset(network, x_train)
+```
+
+Accelerated dataset training:
+
+```python
+import numpy as np
+
+from neural_net import (
+    AcceleratedTrainingConfig,
+    ActivationFunc,
+    build_accelerated_network,
+    fit_dataset_accelerated,
+    predict_dataset_accelerated,
+)
+
+x_train = np.linspace(-np.pi, np.pi, 2048, dtype=float).reshape(-1, 1)
+y_train = np.sin(x_train)
+
+network = build_accelerated_network(
+    input_layer_dim=1,
+    hidden_layer_shapes=(32, 32, 1),
+    activation=ActivationFunc.tanh,
+    seed=0,
+)
+
+result = fit_dataset_accelerated(
+    network,
+    x_train,
+    y_train,
+    config=AcceleratedTrainingConfig(max_power=10, batch_size=256, seed=0),
+)
+
+predictions = predict_dataset_accelerated(network, x_train)
+```
+
+## Benchmarking
+
+Run the included benchmark to compare scalar and accelerated throughput:
+
+```bash
+uv run python benchmarks/compare_backends.py
+```
+
+The benchmark prints training and inference times plus the measured speedup. By default it treats `10x` as the minimum acceptable acceleration target.
+
+## Tests
+
+Run the test suite with the standard library runner:
+
+```bash
+uv run python -m unittest discover -s tests -v
+```

@@ -1,13 +1,18 @@
+from __future__ import annotations
+
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from queue import SimpleQueue
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
 from .backend import ActivationFunc, FFNN, FFNNConfig, get_loss_func
+
+if TYPE_CHECKING:
+    from .accelerated import AcceleratedFFNN
 
 
 DEFAULT_DOMAIN = (-np.pi, np.pi)
@@ -73,7 +78,7 @@ class TrainingResult:
     evaluation_targets: np.ndarray
     snapshots: dict[int, np.ndarray]
     losses: dict[int, float]
-    network: FFNN
+    network: FFNN | AcceleratedFFNN
     milestone_steps: tuple[int, ...]
 
 
@@ -168,6 +173,7 @@ def fit_dataset(
 
     rng = np.random.default_rng(config.seed + 1)
     milestones = config.milestone_steps
+    milestone_set = set(milestones)
     snapshots: dict[int, np.ndarray] = {}
     losses: dict[int, float] = {}
     loss_fn = get_loss_func(network.config.loss_func)
@@ -188,7 +194,7 @@ def fit_dataset(
         y_sample = train_targets[sample_index]
         network.fast_backward_pass(x_sample, y_sample, config.learning_rate)
 
-        if step in milestones:
+        if step in milestone_set:
             prediction = predict_dataset(network, evaluation_inputs)
             snapshots[step] = prediction
             losses[step] = float(loss_fn(evaluation_targets, prediction))
@@ -229,6 +235,7 @@ def fit_function(
 
     rng = np.random.default_rng(config.seed + 1)
     milestones = config.milestone_steps
+    milestone_set = set(milestones)
     evaluation_inputs = np.linspace(
         domain[0],
         domain[1],
@@ -263,7 +270,7 @@ def fit_function(
             config.learning_rate,
         )
 
-        if step in milestones:
+        if step in milestone_set:
             prediction = predict_dataset(network, evaluation_inputs)
             snapshots[step] = prediction
             losses[step] = float(loss_fn(evaluation_targets, prediction))
@@ -320,6 +327,8 @@ def _log_milestone(
     x_sample: np.ndarray,
     y_sample: np.ndarray,
     started_at: float,
+    batch_size: int | None = None,
+    samples_seen: int | None = None,
 ):
     if progress_logger is None:
         return
@@ -327,6 +336,12 @@ def _log_milestone(
     elapsed = time.perf_counter() - started_at
     updates_per_second = step / elapsed if elapsed > 0 else float("inf")
     milestone_power = int(np.log2(step))
+    samples_text = ""
+    if batch_size is not None:
+        samples_text += f" batch={batch_size:4d}"
+    if samples_seen is not None:
+        samples_text += f" samples={samples_seen:8d}"
+
     progress_logger(
         f"n={milestone_power:2d} "
         f"updates={step:7d}/{total_steps:7d} "
@@ -336,6 +351,7 @@ def _log_milestone(
         f"last_y={np.asarray(y_sample).reshape(-1)[0]:+.3f} "
         f"elapsed={elapsed:7.2f}s "
         f"rate={updates_per_second:8.1f} updates/s"
+        f"{samples_text}"
     )
 
 

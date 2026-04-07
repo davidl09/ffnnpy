@@ -8,6 +8,15 @@ from .backend import (
     get_loss_func,
     get_loss_func_derivative,
 )
+from .accelerated import (
+    AcceleratedFFNN,
+    AcceleratedRuntime,
+    AcceleratedTrainingConfig,
+    build_accelerated_network,
+    fit_dataset_accelerated,
+    fit_function_accelerated,
+    predict_dataset_accelerated,
+)
 from .training import (
     AsyncProgressPrinter,
     DEFAULT_DOMAIN,
@@ -24,6 +33,9 @@ __all__ = [
     "LossFunc",
     "FFNNConfig",
     "FFNN",
+    "AcceleratedRuntime",
+    "AcceleratedTrainingConfig",
+    "AcceleratedFFNN",
     "get_loss_func",
     "get_loss_func_derivative",
     "get_activation",
@@ -33,7 +45,11 @@ __all__ = [
     "TrainingConfig",
     "TrainingResult",
     "build_random_network",
+    "build_accelerated_network",
     "fit_dataset",
+    "fit_dataset_accelerated",
     "fit_function",
+    "fit_function_accelerated",
     "predict_dataset",
+    "predict_dataset_accelerated",
 ]
