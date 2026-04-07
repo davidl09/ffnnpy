@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import SimpleQueue
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 
@@ -86,7 +86,7 @@ def build_random_network(
     *,
     input_layer_dim: int = 1,
     hidden_layer_shapes: tuple[int, ...] = (32, 32, 1),
-    activation: ActivationFunc = ActivationFunc.tanh,
+    activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
     seed: int = 0,
 ) -> FFNN:
     config = FFNNConfig(

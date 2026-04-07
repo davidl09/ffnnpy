@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Callable, Sequence
 import time
 
 import numpy as np
@@ -83,7 +83,12 @@ class AcceleratedFFNN:
     ):
         self.config = config
         self.runtime = _coerce_runtime(runtime)
-        self.activation_code = _activation_code(self.config.activation_func)
+        self.activation_codes = np.ascontiguousarray(
+            np.array(
+                [_activation_code(func) for func in self.config.layer_activation_funcs],
+                dtype=np.int64,
+            )
+        )
 
         if self.config.loss_func is not LossFunc.mse:
             raise ValueError("AcceleratedFFNN currently supports only mse loss")
@@ -124,14 +129,14 @@ class AcceleratedFFNN:
                 self._numba_weights,
                 self._numba_biases,
                 np.ascontiguousarray(input_rows),
-                self.activation_code,
+                self.activation_codes,
             )
         else:
             outputs, pre_activations, values = _forward_batch_numpy(
                 self.weights,
                 self.biases,
                 input_rows,
-                self.config.activation_func,
+                self.config.layer_activation_funcs,
                 capture_intermediates=True,
             )
             self.pre_activations = pre_activations
@@ -142,7 +147,7 @@ class AcceleratedFFNN:
             self.weights,
             self.biases,
             input_rows,
-            self.config.activation_func,
+            self.config.layer_activation_funcs,
             capture_intermediates=True,
         )
         self.pre_activations = pre_activations
@@ -184,7 +189,7 @@ class AcceleratedFFNN:
                 np.ascontiguousarray(input_rows),
                 np.ascontiguousarray(target_rows),
                 float(learning_rate),
-                self.activation_code,
+                self.activation_codes,
             )
         else:
             predictions, pre_activations, values = _train_batch_numpy(
@@ -193,7 +198,7 @@ class AcceleratedFFNN:
                 input_rows,
                 target_rows,
                 float(learning_rate),
-                self.config.activation_func,
+                self.config.layer_activation_funcs,
             )
             self.pre_activations = pre_activations
             self.values = values
@@ -203,7 +208,7 @@ class AcceleratedFFNN:
             self.weights,
             self.biases,
             input_rows,
-            self.config.activation_func,
+            self.config.layer_activation_funcs,
             capture_intermediates=True,
         )
         self.pre_activations = pre_activations
@@ -245,7 +250,7 @@ def build_accelerated_network(
     *,
     input_layer_dim: int = 1,
     hidden_layer_shapes: tuple[int, ...] = (32, 32, 1),
-    activation: ActivationFunc = ActivationFunc.tanh,
+    activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
     seed: int = 0,
     runtime: AcceleratedRuntime = AcceleratedRuntime.auto,
 ) -> AcceleratedFFNN:
@@ -488,22 +493,27 @@ def _forward_batch_numpy(
     weights: list[np.ndarray],
     biases: list[np.ndarray],
     inputs: np.ndarray,
-    activation: ActivationFunc,
+    layer_activation_funcs: Sequence[ActivationFunc],
     *,
     capture_intermediates: bool,
 ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
     current = inputs
     pre_activations: list[np.ndarray] = []
-    activations: list[np.ndarray] = []
+    layer_outputs: list[np.ndarray] = []
 
-    for weights_layer, biases_layer in zip(weights, biases):
+    for weights_layer, biases_layer, activation in zip(
+        weights,
+        biases,
+        layer_activation_funcs,
+        strict=True,
+    ):
         pre_activation = current @ weights_layer.T + biases_layer
         current = _activate_numpy(pre_activation, activation)
         if capture_intermediates:
             pre_activations.append(pre_activation)
-            activations.append(current)
+            layer_outputs.append(current)
 
-    return current, pre_activations, activations
+    return current, pre_activations, layer_outputs
 
 
 def _train_batch_numpy(
@@ -512,33 +522,42 @@ def _train_batch_numpy(
     inputs: np.ndarray,
     targets: np.ndarray,
     learning_rate: float,
-    activation: ActivationFunc,
+    layer_activation_funcs: Sequence[ActivationFunc],
 ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
     layer_inputs: list[np.ndarray] = [inputs]
     pre_activations: list[np.ndarray] = []
-    activations: list[np.ndarray] = []
+    layer_outputs: list[np.ndarray] = []
     current = inputs
 
-    for weights_layer, biases_layer in zip(weights, biases):
+    for weights_layer, biases_layer, activation in zip(
+        weights,
+        biases,
+        layer_activation_funcs,
+        strict=True,
+    ):
         pre_activation = current @ weights_layer.T + biases_layer
         current = _activate_numpy(pre_activation, activation)
         pre_activations.append(pre_activation)
-        activations.append(current)
+        layer_outputs.append(current)
         layer_inputs.append(current)
 
-    predictions = activations[-1]
+    predictions = layer_outputs[-1]
     deltas: list[np.ndarray] = [np.zeros_like(pre_activation) for pre_activation in pre_activations]
     deltas[-1] = (
         (2.0 * (predictions - targets) / targets.shape[0])
-        * _activation_derivative_numpy(activation, activations[-1], pre_activations[-1])
+        * _activation_derivative_numpy(
+            layer_activation_funcs[-1],
+            layer_outputs[-1],
+            pre_activations[-1],
+        )
     )
 
     for layer_index in range(len(weights) - 2, -1, -1):
         deltas[layer_index] = (
             deltas[layer_index + 1] @ weights[layer_index + 1]
         ) * _activation_derivative_numpy(
-            activation,
-            activations[layer_index],
+            layer_activation_funcs[layer_index],
+            layer_outputs[layer_index],
             pre_activations[layer_index],
         )
 
@@ -546,7 +565,7 @@ def _train_batch_numpy(
         weights[layer_index] -= learning_rate * (deltas[layer_index].T @ layer_inputs[layer_index])
         biases[layer_index] -= learning_rate * deltas[layer_index].sum(axis=0)
 
-    return predictions, pre_activations, activations
+    return predictions, pre_activations, layer_outputs
 
 
 def _evaluate_vectorized_target(target_func, batch_inputs: np.ndarray) -> np.ndarray:
@@ -606,10 +625,18 @@ if njit is not None:
 
 
     @njit(cache=True)
-    def _forward_batch_numba(weights, biases, inputs: np.ndarray, activation_code: int) -> np.ndarray:
+    def _forward_batch_numba(
+        weights,
+        biases,
+        inputs: np.ndarray,
+        activation_codes: np.ndarray,
+    ) -> np.ndarray:
         current = inputs
         for layer_index in range(len(weights)):
-            current = _activate_numba(current @ weights[layer_index].T + biases[layer_index], activation_code)
+            current = _activate_numba(
+                current @ weights[layer_index].T + biases[layer_index],
+                activation_codes[layer_index],
+            )
         return current
 
 
@@ -620,7 +647,7 @@ if njit is not None:
         inputs: np.ndarray,
         targets: np.ndarray,
         learning_rate: float,
-        activation_code: int,
+        activation_codes: np.ndarray,
     ) -> np.ndarray:
         layer_inputs = NumbaList()
         pre_activations = NumbaList()
@@ -630,7 +657,7 @@ if njit is not None:
 
         for layer_index in range(len(weights)):
             pre_activation = current @ weights[layer_index].T + biases[layer_index]
-            current = _activate_numba(pre_activation, activation_code)
+            current = _activate_numba(pre_activation, activation_codes[layer_index])
             pre_activations.append(pre_activation)
             activations.append(current)
             layer_inputs.append(current)
@@ -642,7 +669,11 @@ if njit is not None:
 
         deltas[-1] = (
             (2.0 * (predictions - targets) / targets.shape[0])
-            * _activation_derivative_numba(activations[-1], pre_activations[-1], activation_code)
+            * _activation_derivative_numba(
+                activations[-1],
+                pre_activations[-1],
+                activation_codes[-1],
+            )
         )
 
         for layer_index in range(len(weights) - 2, -1, -1):
@@ -651,7 +682,7 @@ if njit is not None:
             ) * _activation_derivative_numba(
                 activations[layer_index],
                 pre_activations[layer_index],
-                activation_code,
+                activation_codes[layer_index],
             )
 
         for layer_index in range(len(weights)):
