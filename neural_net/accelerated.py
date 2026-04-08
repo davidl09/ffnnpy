@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 import time
 
 import numpy as np
 
-from .backend import ActivationFunc, FFNNConfig, LossFunc, get_loss_func
+from .backend import (
+    ActivationFunc,
+    FFNNConfig,
+    LossFunc,
+    _apply_output_modifier,
+    _apply_output_modifier_batch,
+    get_loss_func,
+)
 from .training import TrainingResult, _log_milestone, _network_shape_text, _normalize_samples
 
 try:
@@ -82,6 +89,7 @@ class AcceleratedFFNN:
         runtime: AcceleratedRuntime = AcceleratedRuntime.auto,
     ):
         self.config = config
+        self.output_modifier = self.config.output_modifier
         self.runtime = _coerce_runtime(runtime)
         self.activation_codes = np.ascontiguousarray(
             np.array(
@@ -110,7 +118,7 @@ class AcceleratedFFNN:
         self._numba_weights = None
         self._numba_biases = None
 
-    def forward_batch(
+    def _forward_batch_raw(
         self,
         inputs: np.ndarray | list[float] | tuple[float, ...],
         *,
@@ -154,8 +162,18 @@ class AcceleratedFFNN:
         self.values = values
         return outputs
 
-    def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
-        return self.forward_batch(x_).reshape(-1)
+    def forward_batch(
+        self,
+        inputs: np.ndarray | list[float] | tuple[float, ...],
+        *,
+        runtime: AcceleratedRuntime | str | None = None,
+    ) -> np.ndarray:
+        raw_outputs = self._forward_batch_raw(inputs, runtime=runtime)
+        return _apply_output_modifier_batch(raw_outputs, self.output_modifier)
+
+    def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]):
+        raw_output = self._forward_batch_raw(x_).reshape(-1)
+        return _apply_output_modifier(self.output_modifier, raw_output)
 
     def train_batch(
         self,
@@ -253,12 +271,14 @@ def build_accelerated_network(
     activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
     seed: int = 0,
     runtime: AcceleratedRuntime = AcceleratedRuntime.auto,
+    output_modifier: Callable[[np.ndarray], Any] | None = None,
 ) -> AcceleratedFFNN:
     config = FFNNConfig(
         input_layer_dim=input_layer_dim,
         hidden_layer_count=len(hidden_layer_shapes),
         hidden_layer_shapes=hidden_layer_shapes,
         activation_func=activation,
+        output_modifier=output_modifier,
     )
     network = AcceleratedFFNN(config, runtime=runtime)
 
@@ -362,7 +382,7 @@ def fit_dataset_accelerated(
         network.train_batch(x_batch, y_batch, config.learning_rate, runtime=resolved_runtime)
 
         if step in milestone_set:
-            prediction = network.forward_batch(evaluation_inputs, runtime=resolved_runtime)
+            prediction = network._forward_batch_raw(evaluation_inputs, runtime=resolved_runtime)
             snapshots[step] = np.array(prediction, copy=True)
             losses[step] = float(loss_fn(evaluation_targets, prediction))
             _log_milestone(
@@ -436,7 +456,7 @@ def fit_function_accelerated(
         network.train_batch(x_batch, y_batch, config.learning_rate, runtime=resolved_runtime)
 
         if step in milestone_set:
-            prediction = network.forward_batch(evaluation_inputs, runtime=resolved_runtime)
+            prediction = network._forward_batch_raw(evaluation_inputs, runtime=resolved_runtime)
             snapshots[step] = np.array(prediction, copy=True)
             losses[step] = float(loss_fn(evaluation_targets, prediction))
             _log_milestone(

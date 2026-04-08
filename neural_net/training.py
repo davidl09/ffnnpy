@@ -5,11 +5,17 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import SimpleQueue
-from typing import TYPE_CHECKING, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 import numpy as np
 
-from .backend import ActivationFunc, FFNN, FFNNConfig, get_loss_func
+from .backend import (
+    ActivationFunc,
+    FFNN,
+    FFNNConfig,
+    _apply_output_modifier_batch,
+    get_loss_func,
+)
 
 if TYPE_CHECKING:
     from .accelerated import AcceleratedFFNN
@@ -88,12 +94,14 @@ def build_random_network(
     hidden_layer_shapes: tuple[int, ...] = (32, 32, 1),
     activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
     seed: int = 0,
+    output_modifier: Callable[[np.ndarray], Any] | None = None,
 ) -> FFNN:
     config = FFNNConfig(
         input_layer_dim=input_layer_dim,
         hidden_layer_count=len(hidden_layer_shapes),
         hidden_layer_shapes=hidden_layer_shapes,
         activation_func=activation,
+        output_modifier=output_modifier,
     )
     network = FFNN(config)
 
@@ -116,13 +124,18 @@ def build_random_network(
 
 
 def predict_dataset(network: FFNN, inputs: np.ndarray) -> np.ndarray:
+    raw_predictions = _predict_dataset_raw(network, inputs)
+    return _apply_output_modifier_batch(raw_predictions, network.output_modifier)
+
+
+def _predict_dataset_raw(network: FFNN, inputs: np.ndarray) -> np.ndarray:
     input_rows = _normalize_samples(
         inputs,
         feature_dim=network.config.input_layer_dim,
         name="inputs",
     )
     return np.array(
-        [network.fast_forward_pass(sample) for sample in input_rows],
+        [network._raw_forward_pass(sample) for sample in input_rows],
         dtype=float,
     )
 
@@ -195,7 +208,7 @@ def fit_dataset(
         network.fast_backward_pass(x_sample, y_sample, config.learning_rate)
 
         if step in milestone_set:
-            prediction = predict_dataset(network, evaluation_inputs)
+            prediction = _predict_dataset_raw(network, evaluation_inputs)
             snapshots[step] = prediction
             losses[step] = float(loss_fn(evaluation_targets, prediction))
             _log_milestone(
@@ -271,7 +284,7 @@ def fit_function(
         )
 
         if step in milestone_set:
-            prediction = predict_dataset(network, evaluation_inputs)
+            prediction = _predict_dataset_raw(network, evaluation_inputs)
             snapshots[step] = prediction
             losses[step] = float(loss_fn(evaluation_targets, prediction))
             _log_milestone(

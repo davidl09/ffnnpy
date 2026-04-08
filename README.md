@@ -112,6 +112,20 @@ result = fit_function(
 
 This path performs one-sample updates and keeps the older `FFNN.fast_forward_pass(...)` and `FFNN.fast_backward_pass(...)` workflow unchanged.
 
+You can optionally attach an inference-only output modifier when you build the network:
+
+```python
+network = build_random_network(
+    input_layer_dim=1,
+    hidden_layer_shapes=(32, 32, 1),
+    activation=ActivationFunc.sigmoid,
+    seed=0,
+    output_modifier=lambda output: bool(output[0] >= 0.5),
+)
+```
+
+The modifier receives one sample's final-layer output vector and changes only inference-facing APIs such as `fast_forward_pass(...)` and `predict_dataset(...)`. Training, loss evaluation, and `TrainingResult.snapshots` continue to use the raw numeric outputs.
+
 ## Accelerated Backend
 
 Use the accelerated backend when you want vectorized training and inference:
@@ -155,6 +169,7 @@ Accelerated-path assumptions:
 - milestone `updates` still mean optimizer steps, not individual samples
 - progress logs include batch size and total samples seen
 - `fit_function_accelerated(...)` requires a vectorized target function that accepts NumPy inputs and returns one scalar output per sample
+- `output_modifier` is inference-only; accelerated training and `train_batch(...)` still operate on the raw numeric outputs
 
 ## Dataset Training
 

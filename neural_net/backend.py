@@ -1,7 +1,9 @@
 import numpy as np
 
 from enum import Enum
-from typing import Sequence
+from typing import Any, Callable, Sequence
+
+OutputModifier = Callable[[np.ndarray], Any]
 
 class ActivationFunc(Enum):
     relu = "relu"
@@ -47,6 +49,7 @@ class FFNNConfig:
     activation_func: ActivationFunc | tuple[ActivationFunc, ...] = ActivationFunc.tanh
     layer_activation_funcs: tuple[ActivationFunc, ...] = (ActivationFunc.tanh,)
     loss_func: LossFunc = LossFunc.mse
+    output_modifier: OutputModifier | None = None
 
     def __init__(
         self,
@@ -54,7 +57,8 @@ class FFNNConfig:
         hidden_layer_count: int = 3,
         hidden_layer_shapes: np.ndarray | list[int] | tuple[int, ...] | None = None,
         activation_func: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
-        loss_func: LossFunc = LossFunc.mse
+        loss_func: LossFunc = LossFunc.mse,
+        output_modifier: OutputModifier | None = None,
     ):
         self.input_layer_dim = int(input_layer_dim)
         self.hidden_layer_count = int(hidden_layer_count)
@@ -81,6 +85,7 @@ class FFNNConfig:
         else:
             self.activation_func = self.layer_activation_funcs
         self.loss_func = loss_func
+        self.output_modifier = output_modifier
 
 
 def get_loss_func(func: LossFunc):
@@ -171,9 +176,49 @@ def get_activation_derivative(func: ActivationFunc):
     raise ValueError(f"Function {func} not supported")
 
 
+def _apply_output_modifier(
+    output_modifier: OutputModifier | None,
+    raw_output: np.ndarray,
+):
+    sample_output = np.array(raw_output, dtype=float, copy=True).reshape(-1)
+    if output_modifier is None:
+        return sample_output
+    return output_modifier(sample_output)
+
+
+def _apply_output_modifier_batch(
+    raw_outputs: np.ndarray,
+    output_modifier: OutputModifier | None,
+) -> np.ndarray:
+    output_rows = np.asarray(raw_outputs, dtype=float)
+    if output_rows.ndim == 1:
+        output_rows = output_rows.reshape(1, -1)
+
+    if output_modifier is None:
+        return output_rows
+
+    modified_outputs = [
+        np.asarray(_apply_output_modifier(output_modifier, sample_output))
+        for sample_output in output_rows
+    ]
+    expected_shape = modified_outputs[0].shape if modified_outputs else ()
+
+    for modified_output in modified_outputs[1:]:
+        if modified_output.shape != expected_shape:
+            raise ValueError(
+                "output_modifier must return values with a consistent shape for each sample"
+            )
+
+    if expected_shape == ():
+        return np.asarray([modified_output.item() for modified_output in modified_outputs])
+
+    return np.stack(modified_outputs, axis=0)
+
+
 class FFNN():
     def __init__(self, config: FFNNConfig):
         self.config = config
+        self.output_modifier = self.config.output_modifier
 
         self.pre_activations: np.ndarray = np.empty(self.config.hidden_layer_count, dtype = np.ndarray)
         self.values: np.ndarray          = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
@@ -199,7 +244,7 @@ class FFNN():
             else self.activations
         )
 
-    def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
+    def _raw_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
         x = np.asarray(x_, dtype=np.float64).reshape(-1)
         if x.shape[0] != self.config.input_layer_dim:
             raise ValueError("input shape must match input layer shape")
@@ -209,10 +254,13 @@ class FFNN():
             self.values[i] = self.activations[i](self.pre_activations[i])
             
         return self.values[-1]
+
+    def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]):
+        return _apply_output_modifier(self.output_modifier, self._raw_forward_pass(x_))
     
     def fast_backward_pass(self, x: np.ndarray, y_actual: np.ndarray, learning_rate: float):
         x = np.asarray(x, dtype=np.float64).reshape(-1)
-        y_pred = np.asarray(self.fast_forward_pass(x), dtype=np.float64).reshape(-1)
+        y_pred = np.asarray(self._raw_forward_pass(x), dtype=np.float64).reshape(-1)
         y_actual = np.asarray(y_actual, dtype=np.float64).reshape(-1)
         if y_actual.shape != y_pred.shape:
             raise ValueError("y_actual shape must match the network output shape")
