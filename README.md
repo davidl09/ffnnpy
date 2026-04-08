@@ -73,6 +73,7 @@ from neural_net import (
     ActivationFunc,
     FFNN,
     FFNNConfig,
+    LoadedNetworkArtifact,
     TrainingConfig,
     TrainingResult,
     build_accelerated_network,
@@ -81,9 +82,64 @@ from neural_net import (
     fit_dataset_accelerated,
     fit_function,
     fit_function_accelerated,
+    load_network,
     predict_dataset,
     predict_dataset_accelerated,
+    register_output_modifier,
+    save_network,
 )
+```
+
+## Model Persistence
+
+Save a trained network to a compressed `.ffnnpy` file and load it back later:
+
+```python
+from neural_net import (
+    TrainingConfig,
+    build_random_network,
+    load_network,
+    save_network,
+)
+
+network = build_random_network(
+    input_layer_dim=1,
+    hidden_layer_shapes=(32, 32, 1),
+    activation="tanh",
+    seed=0,
+)
+
+save_network(
+    network,
+    "sin_approximator.ffnnpy",
+    training_config=TrainingConfig(max_power=12, seed=0),
+)
+
+artifact = load_network("sin_approximator.ffnnpy")
+restored_network = artifact.network
+restored_training_config = artifact.training_config
+```
+
+`.ffnnpy` archives store:
+
+- backend kind (`FFNN` or `AcceleratedFFNN`)
+- model architecture, activations, loss, and accelerated runtime when relevant
+- exact weights and biases
+- optional `TrainingConfig` or `AcceleratedTrainingConfig`
+
+If you use an inference-only `output_modifier`, register it under a stable name before saving or loading:
+
+```python
+import numpy as np
+
+from neural_net import register_output_modifier
+
+
+def boolean_threshold(output: np.ndarray) -> bool:
+    return bool(output[0] >= 0.5)
+
+
+register_output_modifier("boolean_threshold", boolean_threshold)
 ```
 
 ## Reference Backend

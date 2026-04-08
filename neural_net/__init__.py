@@ -27,6 +27,12 @@ from .training import (
     fit_function,
     predict_dataset,
 )
+from .persistence import (
+    LoadedNetworkArtifact,
+    load_network,
+    register_output_modifier,
+    save_network,
+)
 
 __all__ = [
     "ActivationFunc",
@@ -52,4 +58,8 @@ __all__ = [
     "fit_function_accelerated",
     "predict_dataset",
     "predict_dataset_accelerated",
+    "LoadedNetworkArtifact",
+    "save_network",
+    "load_network",
+    "register_output_modifier",
 ]
