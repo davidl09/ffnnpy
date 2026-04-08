@@ -15,7 +15,14 @@ from .backend import (
     _apply_output_modifier_batch,
     get_loss_func,
 )
-from .training import TrainingResult, _log_milestone, _network_shape_text, _normalize_samples
+from .training import (
+    DEFAULT_MILESTONES,
+    TrainingResult,
+    _log_milestone,
+    _network_shape_text,
+    _normalize_milestones,
+    _normalize_samples,
+)
 
 try:
     from numba import njit
@@ -68,7 +75,7 @@ def _loss_code(loss_func: LossFunc) -> int:
 @dataclass(frozen=True)
 class AcceleratedTrainingConfig:
     learning_rate: float = 0.02
-    max_power: int = 12
+    milestones: tuple[int, ...] = DEFAULT_MILESTONES
     evaluation_points: int = 512
     seed: int = 0
     batch_size: int = 256
@@ -77,19 +84,14 @@ class AcceleratedTrainingConfig:
     def __post_init__(self):
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
-        if self.max_power < 0:
-            raise ValueError("max_power must be non-negative")
         if self.evaluation_points < 2:
             raise ValueError("evaluation_points must be at least 2")
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
+        object.__setattr__(self, "milestones", _normalize_milestones(self.milestones))
         if self.runtime is not None:
             object.__setattr__(self, "runtime", _coerce_runtime(self.runtime))
-
-    @property
-    def milestone_steps(self) -> tuple[int, ...]:
-        return tuple(2**power for power in range(self.max_power + 1))
 
 
 class AcceleratedFFNN:
@@ -391,8 +393,7 @@ def fit_dataset_accelerated(
         raise ValueError("evaluation_inputs and evaluation_targets must contain at least one sample")
 
     rng = np.random.default_rng(config.seed + 1)
-    milestones = config.milestone_steps
-    milestone_set = set(milestones)
+    milestones = config.milestones
     snapshots: dict[int, np.ndarray] = {}
     losses: dict[int, float] = {}
     loss_fn = get_loss_func(
@@ -406,34 +407,36 @@ def fit_dataset_accelerated(
         progress_logger(
             "training start: "
             f"samples={train_inputs.shape[0]} "
-            f"updates={milestones[-1]} "
+            f"target_samples={milestones[-1]} "
             f"batch_size={config.batch_size} "
             f"lr={config.learning_rate:.4f} "
             f"runtime={resolved_runtime.value} "
             f"shape={_network_shape_text(network)}"
         )
 
-    for step in range(1, milestones[-1] + 1):
-        sample_index = rng.integers(train_inputs.shape[0], size=config.batch_size)
-        x_batch = train_inputs[sample_index]
-        y_batch = train_targets[sample_index]
-        network.train_batch(x_batch, y_batch, config.learning_rate, runtime=resolved_runtime)
+    samples_seen = 0
+    for milestone in milestones:
+        while samples_seen < milestone:
+            current_batch_size = min(config.batch_size, milestone - samples_seen)
+            sample_index = rng.integers(train_inputs.shape[0], size=current_batch_size)
+            x_batch = train_inputs[sample_index]
+            y_batch = train_targets[sample_index]
+            network.train_batch(x_batch, y_batch, config.learning_rate, runtime=resolved_runtime)
+            samples_seen += current_batch_size
 
-        if step in milestone_set:
-            prediction = network._forward_batch_raw(evaluation_inputs, runtime=resolved_runtime)
-            snapshots[step] = np.array(prediction, copy=True)
-            losses[step] = float(loss_fn(evaluation_targets, prediction))
-            _log_milestone(
-                progress_logger,
-                step=step,
-                total_steps=milestones[-1],
-                loss_value=losses[step],
-                x_sample=x_batch[-1],
-                y_sample=y_batch[-1],
-                started_at=training_start,
-                batch_size=config.batch_size,
-                samples_seen=step * config.batch_size,
-            )
+        prediction = network._forward_batch_raw(evaluation_inputs, runtime=resolved_runtime)
+        snapshots[milestone] = np.array(prediction, copy=True)
+        losses[milestone] = float(loss_fn(evaluation_targets, prediction))
+        _log_milestone(
+            progress_logger,
+            milestone=milestone,
+            total_milestone=milestones[-1],
+            loss_value=losses[milestone],
+            x_sample=x_batch[-1],
+            y_sample=y_batch[-1],
+            started_at=training_start,
+            batch_size=x_batch.shape[0],
+        )
 
     return TrainingResult(
         evaluation_inputs=evaluation_inputs,
@@ -441,7 +444,7 @@ def fit_dataset_accelerated(
         snapshots=snapshots,
         losses=losses,
         network=network,
-        milestone_steps=milestones,
+        milestones=milestones,
     )
 
 
@@ -461,8 +464,7 @@ def fit_function_accelerated(
         raise ValueError("fit_function_accelerated currently supports only scalar outputs")
 
     rng = np.random.default_rng(config.seed + 1)
-    milestones = config.milestone_steps
-    milestone_set = set(milestones)
+    milestones = config.milestones
     evaluation_inputs = np.linspace(
         domain[0],
         domain[1],
@@ -484,33 +486,35 @@ def fit_function_accelerated(
         progress_logger(
             "training start: "
             f"domain=[{domain[0]:.3f}, {domain[1]:.3f}] "
-            f"updates={milestones[-1]} "
+            f"target_samples={milestones[-1]} "
             f"batch_size={config.batch_size} "
             f"lr={config.learning_rate:.4f} "
             f"runtime={resolved_runtime.value} "
             f"shape={_network_shape_text(network)}"
         )
 
-    for step in range(1, milestones[-1] + 1):
-        x_batch = rng.uniform(domain[0], domain[1], size=(config.batch_size, 1))
-        y_batch = _evaluate_vectorized_target(target_func, x_batch)
-        network.train_batch(x_batch, y_batch, config.learning_rate, runtime=resolved_runtime)
+    samples_seen = 0
+    for milestone in milestones:
+        while samples_seen < milestone:
+            current_batch_size = min(config.batch_size, milestone - samples_seen)
+            x_batch = rng.uniform(domain[0], domain[1], size=(current_batch_size, 1))
+            y_batch = _evaluate_vectorized_target(target_func, x_batch)
+            network.train_batch(x_batch, y_batch, config.learning_rate, runtime=resolved_runtime)
+            samples_seen += current_batch_size
 
-        if step in milestone_set:
-            prediction = network._forward_batch_raw(evaluation_inputs, runtime=resolved_runtime)
-            snapshots[step] = np.array(prediction, copy=True)
-            losses[step] = float(loss_fn(evaluation_targets, prediction))
-            _log_milestone(
-                progress_logger,
-                step=step,
-                total_steps=milestones[-1],
-                loss_value=losses[step],
-                x_sample=x_batch[-1],
-                y_sample=y_batch[-1],
-                started_at=training_start,
-                batch_size=config.batch_size,
-                samples_seen=step * config.batch_size,
-            )
+        prediction = network._forward_batch_raw(evaluation_inputs, runtime=resolved_runtime)
+        snapshots[milestone] = np.array(prediction, copy=True)
+        losses[milestone] = float(loss_fn(evaluation_targets, prediction))
+        _log_milestone(
+            progress_logger,
+            milestone=milestone,
+            total_milestone=milestones[-1],
+            loss_value=losses[milestone],
+            x_sample=x_batch[-1],
+            y_sample=y_batch[-1],
+            started_at=training_start,
+            batch_size=x_batch.shape[0],
+        )
 
     return TrainingResult(
         evaluation_inputs=evaluation_inputs,
@@ -518,7 +522,7 @@ def fit_function_accelerated(
         snapshots=snapshots,
         losses=losses,
         network=network,
-        milestone_steps=milestones,
+        milestones=milestones,
     )
 
 

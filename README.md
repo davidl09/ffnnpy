@@ -103,6 +103,7 @@ from neural_net import (
     TrainingConfig,
     build_random_network,
     load_network,
+    powers_of_two_milestones,
     save_network,
 )
 
@@ -116,7 +117,7 @@ network = build_random_network(
 save_network(
     network,
     "sin_approximator.ffnnpy",
-    training_config=TrainingConfig(max_power=12, seed=0),
+    training_config=TrainingConfig(milestones=powers_of_two_milestones(12), seed=0),
 )
 
 artifact = load_network("sin_approximator.ffnnpy")
@@ -153,7 +154,7 @@ Use the original backend when you want the simple scalar training path:
 ```python
 import numpy as np
 
-from neural_net import TrainingConfig, build_random_network, fit_function
+from neural_net import TrainingConfig, build_random_network, fit_function, powers_of_two_milestones
 from neural_net.backend import ActivationFunc
 
 network = build_random_network(
@@ -166,7 +167,7 @@ network = build_random_network(
 result = fit_function(
     network,
     np.sin,
-    config=TrainingConfig(max_power=12, seed=0),
+    config=TrainingConfig(milestones=powers_of_two_milestones(12), seed=0),
 )
 ```
 
@@ -199,6 +200,7 @@ from neural_net import (
     ActivationFunc,
     build_accelerated_network,
     fit_function_accelerated,
+    powers_of_two_milestones,
 )
 
 network = build_accelerated_network(
@@ -214,7 +216,7 @@ result = fit_function_accelerated(
     np.sin,
     config=AcceleratedTrainingConfig(
         learning_rate=0.02,
-        max_power=12,
+        milestones=powers_of_two_milestones(12),
         evaluation_points=512,
         seed=0,
         batch_size=256,
@@ -225,7 +227,7 @@ result = fit_function_accelerated(
 Accelerated-path assumptions:
 
 - training uses mini-batch updates
-- milestone `updates` still mean optimizer steps, not individual samples
+- milestones are cumulative training samples seen
 - progress logs include batch size and total samples seen
 - omitting `AcceleratedTrainingConfig.runtime` makes training inherit `network.runtime`; setting it explicitly overrides the network for that fit call
 - `fit_function_accelerated(...)` requires a vectorized target function that accepts NumPy inputs and returns one scalar output per sample
@@ -238,7 +240,13 @@ Reference dataset training:
 ```python
 import numpy as np
 
-from neural_net import TrainingConfig, build_random_network, fit_dataset, predict_dataset
+from neural_net import (
+    TrainingConfig,
+    build_random_network,
+    fit_dataset,
+    predict_dataset,
+    powers_of_two_milestones,
+)
 from neural_net.backend import ActivationFunc
 
 x_train = np.array([[0.0], [0.5], [1.0], [1.5]], dtype=float)
@@ -255,7 +263,7 @@ result = fit_dataset(
     network,
     x_train,
     y_train,
-    config=TrainingConfig(max_power=10, seed=0),
+    config=TrainingConfig(milestones=powers_of_two_milestones(10), seed=0),
 )
 
 predictions = predict_dataset(network, x_train)
@@ -272,6 +280,7 @@ from neural_net import (
     build_accelerated_network,
     fit_dataset_accelerated,
     predict_dataset_accelerated,
+    powers_of_two_milestones,
 )
 
 x_train = np.linspace(-np.pi, np.pi, 2048, dtype=float).reshape(-1, 1)
@@ -288,7 +297,11 @@ result = fit_dataset_accelerated(
     network,
     x_train,
     y_train,
-    config=AcceleratedTrainingConfig(max_power=10, batch_size=256, seed=0),
+    config=AcceleratedTrainingConfig(
+        milestones=powers_of_two_milestones(10),
+        batch_size=256,
+        seed=0,
+    ),
 )
 
 predictions = predict_dataset_accelerated(network, x_train)

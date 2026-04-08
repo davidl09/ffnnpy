@@ -47,7 +47,7 @@ class PersistenceTests(unittest.TestCase):
         )
         training_config = TrainingConfig(
             learning_rate=0.03,
-            max_power=8,
+            milestones=(1, 2, 4, 8, 16, 32, 64, 128, 256),
             evaluation_points=64,
             seed=11,
         )
@@ -126,7 +126,7 @@ class PersistenceTests(unittest.TestCase):
         )
         training_config = AcceleratedTrainingConfig(
             learning_rate=0.04,
-            max_power=7,
+            milestones=(1, 2, 4, 8, 16, 32, 64, 128),
             evaluation_points=32,
             seed=13,
             batch_size=9,
@@ -202,7 +202,7 @@ class PersistenceTests(unittest.TestCase):
         )
         training_config = AcceleratedTrainingConfig(
             learning_rate=0.04,
-            max_power=7,
+            milestones=(1, 2, 4, 8, 16, 32, 64, 128),
             evaluation_points=32,
             seed=13,
             batch_size=9,
@@ -267,6 +267,39 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(artifact.backend, "reference")
         self.assertIs(artifact.network.config.loss_func, LossFunc.cross_entropy)
         self.assertEqual(artifact.network.config.positive_class_weight, 1.0)
+
+    def test_load_rejects_legacy_training_config_without_milestones(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "legacy-training-config.ffnnpy"
+            self._write_archive(
+                path,
+                metadata={
+                    "format_version": 1,
+                    "backend": "accelerated",
+                    "network": {
+                        "input_layer_dim": 1,
+                        "hidden_layer_shapes": [1],
+                        "layer_activation_funcs": ["sigmoid"],
+                        "loss_func": "cross_entropy",
+                        "runtime": "numpy",
+                    },
+                    "output_modifier_name": None,
+                    "training_config": {
+                        "backend": "accelerated",
+                        "learning_rate": 0.02,
+                        "max_power": 1,
+                        "evaluation_points": 16,
+                        "seed": 0,
+                        "batch_size": 4,
+                        "runtime": "numpy",
+                    },
+                },
+                weights_0=np.array([[1.0]], dtype=float),
+                biases_0=np.array([0.0], dtype=float),
+            )
+
+            with self.assertRaisesRegex(ValueError, "milestones"):
+                load_network(path)
 
     def test_unregistered_output_modifier_is_rejected_on_save(self):
         network = build_random_network(

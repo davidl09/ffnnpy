@@ -29,6 +29,34 @@ _REFERENCE_TARGET_FUNC_ERROR = (
 )
 
 
+def powers_of_two_milestones(max_power: int) -> tuple[int, ...]:
+    if max_power < 0:
+        raise ValueError("max_power must be non-negative")
+    return tuple(2**power for power in range(max_power + 1))
+
+
+DEFAULT_MILESTONES = powers_of_two_milestones(12)
+
+
+def _normalize_milestones(values: Sequence[int]) -> tuple[int, ...]:
+    if isinstance(values, (str, bytes)):
+        raise ValueError("milestones must be a sequence of positive integers")
+
+    milestones = tuple(int(value) for value in values)
+    if not milestones:
+        raise ValueError("milestones must contain at least one value")
+
+    previous = 0
+    for milestone in milestones:
+        if milestone < 1:
+            raise ValueError("milestones must contain only positive integers")
+        if milestone <= previous:
+            raise ValueError("milestones must be strictly increasing")
+        previous = milestone
+
+    return milestones
+
+
 class AsyncProgressPrinter:
     def __init__(self, enabled: bool = False):
         self.enabled = enabled
@@ -66,21 +94,16 @@ class AsyncProgressPrinter:
 @dataclass(frozen=True)
 class TrainingConfig:
     learning_rate: float = 0.02
-    max_power: int = 12
+    milestones: tuple[int, ...] = DEFAULT_MILESTONES
     evaluation_points: int = 512
     seed: int = 0
 
     def __post_init__(self):
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
-        if self.max_power < 0:
-            raise ValueError("max_power must be non-negative")
         if self.evaluation_points < 2:
             raise ValueError("evaluation_points must be at least 2")
-
-    @property
-    def milestone_steps(self) -> tuple[int, ...]:
-        return tuple(2**power for power in range(self.max_power + 1))
+        object.__setattr__(self, "milestones", _normalize_milestones(self.milestones))
 
 
 @dataclass
@@ -90,7 +113,7 @@ class TrainingResult:
     snapshots: dict[int, np.ndarray]
     losses: dict[int, float]
     network: FFNN | AcceleratedFFNN
-    milestone_steps: tuple[int, ...]
+    milestones: tuple[int, ...]
 
 
 def build_random_network(
@@ -198,8 +221,7 @@ def fit_dataset(
         raise ValueError("evaluation_inputs and evaluation_targets must contain at least one sample")
 
     rng = np.random.default_rng(config.seed + 1)
-    milestones = config.milestone_steps
-    milestone_set = set(milestones)
+    milestones = config.milestones
     snapshots: dict[int, np.ndarray] = {}
     losses: dict[int, float] = {}
     loss_fn = get_loss_func(
@@ -212,30 +234,32 @@ def fit_dataset(
         progress_logger(
             "training start: "
             f"samples={train_inputs.shape[0]} "
-            f"updates={milestones[-1]} "
+            f"target_samples={milestones[-1]} "
             f"lr={config.learning_rate:.4f} "
             f"shape={_network_shape_text(network)}"
         )
 
-    for step in range(1, milestones[-1] + 1):
-        sample_index = int(rng.integers(train_inputs.shape[0]))
-        x_sample = train_inputs[sample_index]
-        y_sample = train_targets[sample_index]
-        network.fast_backward_pass(x_sample, y_sample, config.learning_rate)
+    samples_seen = 0
+    for milestone in milestones:
+        while samples_seen < milestone:
+            sample_index = int(rng.integers(train_inputs.shape[0]))
+            x_sample = train_inputs[sample_index]
+            y_sample = train_targets[sample_index]
+            network.fast_backward_pass(x_sample, y_sample, config.learning_rate)
+            samples_seen += 1
 
-        if step in milestone_set:
-            prediction = _predict_dataset_raw(network, evaluation_inputs)
-            snapshots[step] = prediction
-            losses[step] = float(loss_fn(evaluation_targets, prediction))
-            _log_milestone(
-                progress_logger,
-                step=step,
-                total_steps=milestones[-1],
-                loss_value=losses[step],
-                x_sample=x_sample,
-                y_sample=y_sample,
-                started_at=training_start,
-            )
+        prediction = _predict_dataset_raw(network, evaluation_inputs)
+        snapshots[milestone] = prediction
+        losses[milestone] = float(loss_fn(evaluation_targets, prediction))
+        _log_milestone(
+            progress_logger,
+            milestone=milestone,
+            total_milestone=milestones[-1],
+            loss_value=losses[milestone],
+            x_sample=x_sample,
+            y_sample=y_sample,
+            started_at=training_start,
+        )
 
     return TrainingResult(
         evaluation_inputs=evaluation_inputs,
@@ -243,7 +267,7 @@ def fit_dataset(
         snapshots=snapshots,
         losses=losses,
         network=network,
-        milestone_steps=milestones,
+        milestones=milestones,
     )
 
 
@@ -263,8 +287,7 @@ def fit_function(
         raise ValueError("fit_function currently supports only scalar outputs")
 
     rng = np.random.default_rng(config.seed + 1)
-    milestones = config.milestone_steps
-    milestone_set = set(milestones)
+    milestones = config.milestones
     evaluation_inputs = np.linspace(
         domain[0],
         domain[1],
@@ -285,38 +308,40 @@ def fit_function(
         progress_logger(
             "training start: "
             f"domain=[{domain[0]:.3f}, {domain[1]:.3f}] "
-            f"updates={milestones[-1]} "
+            f"target_samples={milestones[-1]} "
             f"lr={config.learning_rate:.4f} "
             f"shape={_network_shape_text(network)}"
         )
 
-    for step in range(1, milestones[-1] + 1):
-        x_sample = rng.uniform(domain[0], domain[1])
-        y_sample = float(
-            _evaluate_reference_target(
-                target_func,
-                np.array([x_sample], dtype=float),
-            )[0, 0]
-        )
-        network.fast_backward_pass(
-            np.array([x_sample], dtype=float),
-            np.array([y_sample], dtype=float),
-            config.learning_rate,
-        )
-
-        if step in milestone_set:
-            prediction = _predict_dataset_raw(network, evaluation_inputs)
-            snapshots[step] = prediction
-            losses[step] = float(loss_fn(evaluation_targets, prediction))
-            _log_milestone(
-                progress_logger,
-                step=step,
-                total_steps=milestones[-1],
-                loss_value=losses[step],
-                x_sample=np.array([x_sample], dtype=float),
-                y_sample=np.array([y_sample], dtype=float),
-                started_at=training_start,
+    samples_seen = 0
+    for milestone in milestones:
+        while samples_seen < milestone:
+            x_sample = rng.uniform(domain[0], domain[1])
+            y_sample = float(
+                _evaluate_reference_target(
+                    target_func,
+                    np.array([x_sample], dtype=float),
+                )[0, 0]
             )
+            network.fast_backward_pass(
+                np.array([x_sample], dtype=float),
+                np.array([y_sample], dtype=float),
+                config.learning_rate,
+            )
+            samples_seen += 1
+
+        prediction = _predict_dataset_raw(network, evaluation_inputs)
+        snapshots[milestone] = prediction
+        losses[milestone] = float(loss_fn(evaluation_targets, prediction))
+        _log_milestone(
+            progress_logger,
+            milestone=milestone,
+            total_milestone=milestones[-1],
+            loss_value=losses[milestone],
+            x_sample=np.array([x_sample], dtype=float),
+            y_sample=np.array([y_sample], dtype=float),
+            started_at=training_start,
+        )
 
     return TrainingResult(
         evaluation_inputs=evaluation_inputs,
@@ -324,7 +349,7 @@ def fit_function(
         snapshots=snapshots,
         losses=losses,
         network=network,
-        milestone_steps=milestones,
+        milestones=milestones,
     )
 
 
@@ -394,47 +419,44 @@ def _network_shape_text(network: FFNN) -> str:
 def _log_milestone(
     progress_logger: Callable[[str], None] | None,
     *,
-    step: int,
-    total_steps: int,
+    milestone: int,
+    total_milestone: int,
     loss_value: float,
     x_sample: np.ndarray,
     y_sample: np.ndarray,
     started_at: float,
     batch_size: int | None = None,
-    samples_seen: int | None = None,
 ):
     if progress_logger is None:
         return
 
     elapsed = time.perf_counter() - started_at
-    updates_per_second = step / elapsed if elapsed > 0 else float("inf")
-    milestone_power = int(np.log2(step))
-    samples_text = ""
+    samples_per_second = milestone / elapsed if elapsed > 0 else float("inf")
+    batch_text = ""
     if batch_size is not None:
-        samples_text += f" batch={batch_size:4d}"
-    if samples_seen is not None:
-        samples_text += f" samples={samples_seen:8d}"
+        batch_text = f" batch={batch_size:4d}"
 
     progress_logger(
-        f"n={milestone_power:2d} "
-        f"updates={step:7d}/{total_steps:7d} "
-        f"progress={100 * step / total_steps:6.2f}% "
+        f"samples={milestone:7d}/{total_milestone:7d} "
+        f"progress={100 * milestone / total_milestone:6.2f}% "
         f"eval_loss={loss_value:.6f} "
         f"last_x={np.asarray(x_sample).reshape(-1)[0]:+.3f} "
         f"last_y={np.asarray(y_sample).reshape(-1)[0]:+.3f} "
         f"elapsed={elapsed:7.2f}s "
-        f"rate={updates_per_second:8.1f} updates/s"
-        f"{samples_text}"
+        f"rate={samples_per_second:8.1f} samples/s"
+        f"{batch_text}"
     )
 
 
 __all__ = [
     "DEFAULT_DOMAIN",
+    "DEFAULT_MILESTONES",
     "AsyncProgressPrinter",
     "TrainingConfig",
     "TrainingResult",
     "build_random_network",
     "predict_dataset",
+    "powers_of_two_milestones",
     "fit_dataset",
     "fit_function",
 ]

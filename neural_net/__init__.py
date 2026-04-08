@@ -20,11 +20,13 @@ from .accelerated import (
 from .training import (
     AsyncProgressPrinter,
     DEFAULT_DOMAIN,
+    DEFAULT_MILESTONES,
     TrainingConfig,
     TrainingResult,
     build_random_network,
     fit_dataset,
     fit_function,
+    powers_of_two_milestones,
     predict_dataset,
 )
 from .persistence import (
@@ -47,10 +49,12 @@ __all__ = [
     "get_activation",
     "get_activation_derivative",
     "DEFAULT_DOMAIN",
+    "DEFAULT_MILESTONES",
     "AsyncProgressPrinter",
     "TrainingConfig",
     "TrainingResult",
     "build_random_network",
+    "powers_of_two_milestones",
     "build_accelerated_network",
     "fit_dataset",
     "fit_dataset_accelerated",

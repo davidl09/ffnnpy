@@ -35,20 +35,21 @@ class Htru2HyperparameterSweepTests(unittest.TestCase):
             architecture_shape=(32, 16, 1),
             train_fraction=0.8,
             learning_rate=0.01,
+            positive_class_weight=1.0,
             init_seed=47,
             split_seed=20260407,
-            max_power=16,
+            milestones=(1, 2, 4, 8, 16),
             batch_size=128,
         )
 
         config = self.module.build_training_config(spec)
 
         self.assertEqual(config.learning_rate, 0.01)
-        self.assertEqual(config.max_power, 16)
+        self.assertEqual(config.milestones, (1, 2, 4, 8, 16))
         self.assertEqual(config.evaluation_points, self.module.DEFAULT_EVALUATION_POINT_COUNT)
         self.assertEqual(config.seed, 47)
         self.assertEqual(config.batch_size, 128)
-        self.assertEqual(config.runtime, AcceleratedRuntime.numba)
+        self.assertEqual(config.runtime, AcceleratedRuntime.numpy)
 
     def test_build_model_hyperparameters_exports_expected_json_payload(self):
         spec = self.module.RunSpec(
@@ -57,9 +58,10 @@ class Htru2HyperparameterSweepTests(unittest.TestCase):
             architecture_shape=(32, 16, 1),
             train_fraction=0.8,
             learning_rate=0.01,
+            positive_class_weight=1.0,
             init_seed=47,
             split_seed=20260407,
-            max_power=16,
+            milestones=(1, 2, 4, 8, 16),
             batch_size=128,
         )
 
@@ -71,13 +73,15 @@ class Htru2HyperparameterSweepTests(unittest.TestCase):
                 "train_fraction": 0.8,
                 "split_seed": 20260407,
                 "hidden_layer_shapes": [32, 16, 1],
-                "activation": ["sigmoid"],
+                "activation": ["sigmoid", "sigmoid", "sigmoid"],
+                "loss_func": "x-entropy",
+                "positive_class_weight": 1.0,
                 "seed": 47,
                 "learning_rate": 0.01,
-                "max_power": 16,
+                "milestones": [1, 2, 4, 8, 16],
                 "evaluation_points": self.module.DEFAULT_EVALUATION_POINT_COUNT,
                 "batch_size": 128,
-                "runtime": "numba",
+                "runtime": "numpy",
             },
         )
 

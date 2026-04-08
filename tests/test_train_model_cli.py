@@ -49,6 +49,20 @@ def run_configure_model(temp_dir: str, run_name: str, *extra_args: str) -> subpr
     )
 
 
+def run_train_model(temp_dir: str, artifact_path: str, *extra_args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(TRAIN_SCRIPT_PATH),
+            artifact_path,
+            *extra_args,
+        ],
+        cwd=temp_dir,
+        capture_output=True,
+        text=True,
+    )
+
+
 class ConfigureModelCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -57,15 +71,17 @@ class ConfigureModelCliTests(unittest.TestCase):
     def test_cli_writes_hyperparams_json_with_requested_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_name = "configured-run"
-            hyperparams_path = Path(temp_dir) / "results" / run_name / "hyperparams.json"
+            artifact_dir = Path(temp_dir) / "results" / run_name
+            hyperparams_path = artifact_dir / "hyperparams.json"
 
             process = run_configure_model(
                 temp_dir,
-                run_name,
+                str(artifact_dir),
                 "--runtime",
                 "numpy",
-                "--max-power",
+                "--milestones",
                 "1",
+                "2",
                 "--batch-size",
                 "32",
                 "--hidden-layer-shapes",
@@ -96,9 +112,11 @@ class ConfigureModelCliTests(unittest.TestCase):
                     "split_seed": 7,
                     "hidden_layer_shapes": [4, 1],
                     "activation": ["tanh", "sigmoid"],
+                    "loss_func": "x-entropy",
+                    "positive_class_weight": 1.0,
                     "seed": 5,
                     "learning_rate": 0.02,
-                    "max_power": 1,
+                    "milestones": [1, 2],
                     "evaluation_points": 64,
                     "batch_size": 32,
                     "runtime": "numpy",
@@ -117,13 +135,13 @@ class TrainModelCliTests(unittest.TestCase):
 
         self.assertEqual(
             path,
-            Path("results") / "demo-run" / "model.ffnnpy",
+            ROOT / "demo-run" / "model.ffnnpy",
         )
 
     def test_default_hyperparams_path_uses_named_results_directory(self):
         self.assertEqual(
             self.module.resolve_hyperparams_path("demo-run"),
-            Path("results") / "demo-run" / "hyperparams.json",
+            ROOT / "demo-run" / "hyperparams.json",
         )
 
     def test_activation_resolution_supports_broadcast_and_per_layer_values(self):
@@ -144,12 +162,15 @@ class TrainModelCliTests(unittest.TestCase):
         features = np.arange(12, dtype=float).reshape(6, 2)
         labels = np.array([0, 0, 0, 1, 1, 1], dtype=np.int64)
 
-        train_x, train_y, test_x, test_y = self.module.stratified_split(
-            features,
+        train_indices, test_indices = self.module.stratified_split_indices(
             labels,
             train_fraction=0.5,
             split_seed=3,
         )
+        train_x = features[train_indices]
+        train_y = labels[train_indices]
+        test_x = features[test_indices]
+        test_y = labels[test_indices]
 
         self.assertEqual(train_x.shape, (4, 2))
         self.assertEqual(test_x.shape, (2, 2))
@@ -159,14 +180,16 @@ class TrainModelCliTests(unittest.TestCase):
     def test_cli_smoke_run_reads_config_and_saves_model_with_requested_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_name = "smoke-run"
+            artifact_dir = Path(temp_dir) / "results" / run_name
             output_path = Path(temp_dir) / "smoke.ffnnpy"
             configure_process = run_configure_model(
                 temp_dir,
-                run_name,
+                str(artifact_dir),
                 "--runtime",
                 "numpy",
-                "--max-power",
+                "--milestones",
                 "1",
+                "2",
                 "--batch-size",
                 "32",
                 "--hidden-layer-shapes",
@@ -188,19 +211,13 @@ class TrainModelCliTests(unittest.TestCase):
             )
             self.assertEqual(configure_process.returncode, 0, msg=configure_process.stderr)
 
-            process = subprocess.run(
-                [
-                    sys.executable,
-                    str(TRAIN_SCRIPT_PATH),
-                    run_name,
-                    "--dataset-path",
-                    str(DATASET_PATH),
-                    "--output-path",
-                    str(output_path),
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
+            process = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
+                "--output-path",
+                str(output_path),
             )
 
             self.assertEqual(process.returncode, 0, msg=process.stderr)
@@ -213,7 +230,7 @@ class TrainModelCliTests(unittest.TestCase):
                 artifact.training_config,
                 AcceleratedTrainingConfig(
                     learning_rate=0.02,
-                    max_power=1,
+                    milestones=(1, 2),
                     evaluation_points=64,
                     seed=5,
                     batch_size=32,
@@ -232,83 +249,79 @@ class TrainModelCliTests(unittest.TestCase):
     def test_cli_default_output_path_creates_named_model_under_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_name = "default-run"
+            artifact_dir = Path(temp_dir) / "results" / run_name
             configure_process = run_configure_model(
                 temp_dir,
-                run_name,
+                str(artifact_dir),
                 "--runtime",
                 "numpy",
-                "--max-power",
-                "0",
+                "--milestones",
+                "1",
                 "--batch-size",
                 "16",
             )
             self.assertEqual(configure_process.returncode, 0, msg=configure_process.stderr)
 
-            process = subprocess.run(
-                [
-                    sys.executable,
-                    str(TRAIN_SCRIPT_PATH),
-                    run_name,
-                    "--dataset-path",
-                    str(DATASET_PATH),
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
+            process = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
             )
 
             self.assertEqual(process.returncode, 0, msg=process.stderr)
-            model_path = Path(temp_dir) / "results" / run_name / "model.ffnnpy"
+            model_path = artifact_dir / "model.ffnnpy"
             self.assertTrue(model_path.exists())
             self.assertIn(str(model_path.resolve()), process.stdout)
 
     def test_cli_writes_training_history_sidecar(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_name = "history-run"
+            artifact_dir = Path(temp_dir) / "results" / run_name
             configure_process = run_configure_model(
                 temp_dir,
-                run_name,
+                str(artifact_dir),
                 "--runtime",
                 "numpy",
-                "--max-power",
+                "--milestones",
+                "1",
                 "2",
+                "4",
                 "--batch-size",
                 "16",
             )
             self.assertEqual(configure_process.returncode, 0, msg=configure_process.stderr)
 
-            process = subprocess.run(
-                [
-                    sys.executable,
-                    str(TRAIN_SCRIPT_PATH),
-                    run_name,
-                    "--dataset-path",
-                    str(DATASET_PATH),
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
+            process = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
             )
 
             self.assertEqual(process.returncode, 0, msg=process.stderr)
-            history_path = Path(temp_dir) / "results" / run_name / "training_history.json"
+            history_path = artifact_dir / "training_history.json"
             self.assertTrue(history_path.exists())
             payload = json.loads(history_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["source"], "recorded_during_training")
             self.assertEqual(payload["metric"], "evaluation_loss")
-            self.assertEqual([point["step"] for point in payload["points"]], [1, 2, 4])
+            self.assertEqual(payload["milestone_label"], "Training samples seen")
+            self.assertEqual([point["milestone"] for point in payload["points"]], [1, 2, 4])
+            self.assertEqual(payload["final_milestone"], 4)
             self.assertAlmostEqual(payload["final_loss"], payload["points"][-1]["loss"])
 
     def test_saved_model_stats_replays_training_history_when_sidecar_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_name = "replay-run"
+            artifact_dir = Path(temp_dir) / "results" / run_name
             configure_process = run_configure_model(
                 temp_dir,
-                run_name,
+                str(artifact_dir),
                 "--runtime",
                 "numpy",
-                "--max-power",
+                "--milestones",
                 "1",
+                "2",
                 "--batch-size",
                 "16",
                 "--seed",
@@ -318,22 +331,16 @@ class TrainModelCliTests(unittest.TestCase):
             )
             self.assertEqual(configure_process.returncode, 0, msg=configure_process.stderr)
 
-            process = subprocess.run(
-                [
-                    sys.executable,
-                    str(TRAIN_SCRIPT_PATH),
-                    run_name,
-                    "--dataset-path",
-                    str(DATASET_PATH),
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
+            process = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
             )
 
             self.assertEqual(process.returncode, 0, msg=process.stderr)
-            model_path = Path(temp_dir) / "results" / run_name / "model.ffnnpy"
-            history_path = Path(temp_dir) / "results" / run_name / "training_history.json"
+            model_path = artifact_dir / "model.ffnnpy"
+            history_path = artifact_dir / "training_history.json"
             history_path.unlink()
 
             stats = self.stats_module.evaluate_saved_model(
@@ -344,7 +351,8 @@ class TrainModelCliTests(unittest.TestCase):
             self.assertIn("training_history", stats)
             training_history = stats["training_history"]
             self.assertEqual(training_history["source"], "replayed_from_hyperparams")
-            self.assertEqual([point["step"] for point in training_history["points"]], [1, 2])
+            self.assertEqual([point["milestone"] for point in training_history["points"]], [1, 2])
+            self.assertEqual(training_history["final_milestone"], 2)
             self.assertAlmostEqual(training_history["final_loss"], training_history["points"][-1]["loss"])
             self.assertAlmostEqual(
                 training_history["verification"]["loss_delta_vs_saved_model"],
@@ -356,36 +364,123 @@ class TrainModelCliTests(unittest.TestCase):
     def test_cli_progress_flag_prints_training_milestones(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_name = "progress-run"
+            artifact_dir = Path(temp_dir) / "results" / run_name
             configure_process = run_configure_model(
                 temp_dir,
-                run_name,
+                str(artifact_dir),
                 "--runtime",
                 "numpy",
-                "--max-power",
+                "--milestones",
                 "1",
+                "2",
                 "--batch-size",
                 "16",
             )
             self.assertEqual(configure_process.returncode, 0, msg=configure_process.stderr)
 
-            process = subprocess.run(
-                [
-                    sys.executable,
-                    str(TRAIN_SCRIPT_PATH),
-                    run_name,
-                    "--dataset-path",
-                    str(DATASET_PATH),
-                    "--progress",
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
+            process = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
+                "--progress",
             )
 
             self.assertEqual(process.returncode, 0, msg=process.stderr)
             self.assertIn("training start:", process.stdout)
             self.assertIn("progress= 50.00%", process.stdout)
             self.assertIn("progress=100.00%", process.stdout)
+
+    def test_cli_resume_extends_absolute_milestones(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_name = "resume-run"
+            artifact_dir = Path(temp_dir) / "results" / run_name
+            configure_process = run_configure_model(
+                temp_dir,
+                str(artifact_dir),
+                "--runtime",
+                "numpy",
+                "--milestones",
+                "1",
+                "2",
+                "--batch-size",
+                "16",
+            )
+            self.assertEqual(configure_process.returncode, 0, msg=configure_process.stderr)
+
+            first_train = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
+            )
+            self.assertEqual(first_train.returncode, 0, msg=first_train.stderr)
+
+            hyperparams_path = artifact_dir / "hyperparams.json"
+            payload = json.loads(hyperparams_path.read_text(encoding="utf-8"))
+            payload["milestones"] = [1, 2, 4, 8]
+            hyperparams_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+            resumed = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
+                "--resume",
+            )
+            self.assertEqual(resumed.returncode, 0, msg=resumed.stderr)
+
+            history_path = artifact_dir / "training_history.json"
+            history = json.loads(history_path.read_text(encoding="utf-8"))
+            self.assertEqual(history["source"], "recorded_during_resumed_training")
+            self.assertEqual([point["milestone"] for point in history["points"]], [1, 2, 4, 8])
+            self.assertEqual(history["final_milestone"], 8)
+
+            model_path = artifact_dir / "model.ffnnpy"
+            artifact = load_network(model_path)
+            self.assertEqual(artifact.training_config.milestones, (2, 6))
+
+    def test_cli_resume_noops_when_requested_milestones_are_already_satisfied(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_name = "resume-noop-run"
+            artifact_dir = Path(temp_dir) / "results" / run_name
+            configure_process = run_configure_model(
+                temp_dir,
+                str(artifact_dir),
+                "--runtime",
+                "numpy",
+                "--milestones",
+                "1",
+                "2",
+                "--batch-size",
+                "16",
+            )
+            self.assertEqual(configure_process.returncode, 0, msg=configure_process.stderr)
+
+            first_train = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
+            )
+            self.assertEqual(first_train.returncode, 0, msg=first_train.stderr)
+
+            model_path = artifact_dir / "model.ffnnpy"
+            history_path = artifact_dir / "training_history.json"
+            model_bytes_before = model_path.read_bytes()
+            history_bytes_before = history_path.read_bytes()
+
+            resumed = run_train_model(
+                temp_dir,
+                str(artifact_dir),
+                "--dataset-path",
+                str(DATASET_PATH),
+                "--resume",
+            )
+            self.assertEqual(resumed.returncode, 0, msg=resumed.stderr)
+            self.assertIn("Requested milestones already satisfied through 2 samples.", resumed.stdout)
+            self.assertEqual(model_path.read_bytes(), model_bytes_before)
+            self.assertEqual(history_path.read_bytes(), history_bytes_before)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from neural_net import (
     fit_dataset_accelerated,
     predict_dataset,
     predict_dataset_accelerated,
+    powers_of_two_milestones,
 )
 from neural_net.backend import get_loss_func
 
@@ -103,15 +104,20 @@ class OutputModifierTests(unittest.TestCase):
             network,
             xs,
             ys,
-            config=TrainingConfig(learning_rate=0.02, max_power=9, evaluation_points=128, seed=0),
+            config=TrainingConfig(
+                learning_rate=0.02,
+                milestones=powers_of_two_milestones(9),
+                evaluation_points=128,
+                seed=0,
+            ),
             evaluation_inputs=xs,
             evaluation_targets=ys,
         )
 
-        final_loss = result.losses[result.milestone_steps[-1]]
+        final_loss = result.losses[result.milestones[-1]]
         self.assertLess(final_loss, initial_loss)
-        self.assertEqual(result.snapshots[result.milestone_steps[-1]].shape, (256, 1))
-        self.assertTrue(np.issubdtype(result.snapshots[result.milestone_steps[-1]].dtype, np.floating))
+        self.assertEqual(result.snapshots[result.milestones[-1]].shape, (256, 1))
+        self.assertTrue(np.issubdtype(result.snapshots[result.milestones[-1]].dtype, np.floating))
 
     def test_accelerated_inference_applies_output_modifier_numpy(self):
         network = build_accelerated_network(
@@ -181,7 +187,7 @@ class OutputModifierTests(unittest.TestCase):
             ys,
             config=AcceleratedTrainingConfig(
                 learning_rate=0.02,
-                max_power=9,
+                milestones=powers_of_two_milestones(9),
                 evaluation_points=128,
                 seed=0,
                 batch_size=64,
@@ -189,10 +195,10 @@ class OutputModifierTests(unittest.TestCase):
             ),
         )
 
-        final_loss = result.losses[result.milestone_steps[-1]]
+        final_loss = result.losses[result.milestones[-1]]
         self.assertLess(final_loss, initial_loss)
-        self.assertEqual(result.snapshots[result.milestone_steps[-1]].shape, (512, 1))
-        self.assertTrue(np.issubdtype(result.snapshots[result.milestone_steps[-1]].dtype, np.floating))
+        self.assertEqual(result.snapshots[result.milestones[-1]].shape, (512, 1))
+        self.assertTrue(np.issubdtype(result.snapshots[result.milestones[-1]].dtype, np.floating))
 
 
 if __name__ == "__main__":

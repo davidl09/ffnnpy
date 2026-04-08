@@ -12,7 +12,13 @@ from .accelerated import (
     fit_function_accelerated,
 )
 from .backend import ActivationFunc
-from .training import AsyncProgressPrinter, TrainingConfig, build_random_network, fit_function
+from .training import (
+    AsyncProgressPrinter,
+    TrainingConfig,
+    build_random_network,
+    fit_function,
+    powers_of_two_milestones,
+)
 
 
 DEFAULT_SAVE_PATH = "sin_learning_milestones.png"
@@ -52,7 +58,7 @@ def plot_training_snapshots(
 
     title = ax.set_title(
         f"Learning sin(x) on [-pi, pi]\n"
-        f"n = 0, updates = {initial_milestone}, MSE = {losses[initial_milestone]:.4f}{title_suffix}"
+        f"n = 0, samples = {initial_milestone}, MSE = {losses[initial_milestone]:.4f}{title_suffix}"
     )
 
     slider_ax = fig.add_axes((0.14, 0.08, 0.72, 0.04))
@@ -72,7 +78,7 @@ def plot_training_snapshots(
         line_pred.set_ydata(snapshots[milestone].reshape(-1))
         title.set_text(
             f"Learning sin(x) on [-pi, pi]\n"
-            f"n = {snapshot_index}, updates = {milestone}, MSE = {losses[milestone]:.4f}{title_suffix}"
+            f"n = {snapshot_index}, samples = {milestone}, MSE = {losses[milestone]:.4f}{title_suffix}"
         )
         fig.canvas.draw_idle()
 
@@ -101,7 +107,7 @@ def parse_args():
         "--runs",
         type=int,
         default=15,
-        help="set number of training passes as a power of 2. e.g. n = 6 -> 2^6 = 64 training runs"
+        help="set the final power-of-two milestone. e.g. n = 6 -> samples {1, 2, 4, ..., 64}",
     )
     parser.add_argument(
         "--backend",
@@ -131,7 +137,7 @@ def main():
     with AsyncProgressPrinter(enabled=args.verbose) as progress_printer:
         if args.backend == "accelerated":
             config = AcceleratedTrainingConfig(
-                max_power=args.runs,
+                milestones=powers_of_two_milestones(args.runs),
                 batch_size=args.batch_size,
                 runtime=AcceleratedRuntime(args.runtime),
             )
@@ -151,10 +157,10 @@ def main():
             resolved_runtime = network.resolve_runtime(config.runtime)
             title_suffix = (
                 f"\nbackend=accelerated, runtime={resolved_runtime.value}, "
-                f"batch={config.batch_size}, samples_seen={config.batch_size * max(result.snapshots)}"
+                f"batch={config.batch_size}, samples_seen={max(result.snapshots)}"
             )
         else:
-            config = TrainingConfig(max_power=args.runs)
+            config = TrainingConfig(milestones=powers_of_two_milestones(args.runs))
             network = build_random_network(
                 input_layer_dim=1,
                 hidden_layer_shapes=(32, 32, 1),

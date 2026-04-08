@@ -21,6 +21,7 @@ from neural_net import (
     fit_function_accelerated,
     predict_dataset,
     predict_dataset_accelerated,
+    powers_of_two_milestones,
 )
 from neural_net.backend import get_loss_func, get_loss_func_derivative
 
@@ -59,6 +60,20 @@ def _manual_weighted_cross_entropy_derivative(
 
 
 class AcceleratedBackendTests(unittest.TestCase):
+    def test_powers_of_two_milestones_helper(self):
+        self.assertEqual(powers_of_two_milestones(0), (1,))
+        self.assertEqual(powers_of_two_milestones(4), (1, 2, 4, 8, 16))
+
+    def test_training_config_rejects_invalid_milestones(self):
+        with self.assertRaisesRegex(ValueError, "at least one value"):
+            TrainingConfig(milestones=())
+        with self.assertRaisesRegex(ValueError, "positive integers"):
+            TrainingConfig(milestones=(0, 1))
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            TrainingConfig(milestones=(1, 1))
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            AcceleratedTrainingConfig(milestones=(1, 3, 2), batch_size=8)
+
     def test_config_expands_single_activation_to_all_layers(self):
         config = FFNNConfig(
             input_layer_dim=1,
@@ -209,7 +224,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             ys,
             config=AcceleratedTrainingConfig(
                 learning_rate=0.02,
-                max_power=9,
+                milestones=powers_of_two_milestones(9),
                 evaluation_points=128,
                 seed=0,
                 batch_size=64,
@@ -217,7 +232,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             ),
         )
 
-        final_loss = result.losses[result.milestone_steps[-1]]
+        final_loss = result.losses[result.milestones[-1]]
         self.assertLess(final_loss, initial_loss)
 
     def test_fit_function_reference_accepts_scalar_target(self):
@@ -237,13 +252,13 @@ class AcceleratedBackendTests(unittest.TestCase):
             math.sin,
             config=TrainingConfig(
                 learning_rate=0.02,
-                max_power=9,
+                milestones=powers_of_two_milestones(9),
                 evaluation_points=256,
                 seed=0,
             ),
         )
 
-        final_loss = result.losses[result.milestone_steps[-1]]
+        final_loss = result.losses[result.milestones[-1]]
         self.assertLess(final_loss, initial_loss)
 
     def test_fit_function_reference_accepts_vectorized_target(self):
@@ -259,14 +274,14 @@ class AcceleratedBackendTests(unittest.TestCase):
             np.sin,
             config=TrainingConfig(
                 learning_rate=0.02,
-                max_power=7,
+                milestones=powers_of_two_milestones(7),
                 evaluation_points=64,
                 seed=0,
             ),
         )
 
         self.assertEqual(
-            result.snapshots[result.milestone_steps[-1]].shape,
+            result.snapshots[result.milestones[-1]].shape,
             (64, 1),
         )
 
@@ -285,7 +300,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             fit_function(
                 network,
                 bad_target,
-                config=TrainingConfig(max_power=1, evaluation_points=8, seed=0),
+                config=TrainingConfig(milestones=(1, 2), evaluation_points=8, seed=0),
             )
 
     def test_fit_function_accelerated_reduces_loss(self):
@@ -305,7 +320,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             np.sin,
             config=AcceleratedTrainingConfig(
                 learning_rate=0.02,
-                max_power=9,
+                milestones=powers_of_two_milestones(9),
                 evaluation_points=256,
                 seed=0,
                 batch_size=64,
@@ -313,7 +328,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             ),
         )
 
-        final_loss = result.losses[result.milestone_steps[-1]]
+        final_loss = result.losses[result.milestones[-1]]
         self.assertLess(final_loss, initial_loss)
 
     def test_fit_dataset_accelerated_inherits_network_runtime_when_config_runtime_is_omitted(self):
@@ -333,7 +348,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             ys,
             config=AcceleratedTrainingConfig(
                 learning_rate=0.02,
-                max_power=0,
+                milestones=(1,),
                 evaluation_points=16,
                 seed=0,
                 batch_size=4,
@@ -357,7 +372,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             np.sin,
             config=AcceleratedTrainingConfig(
                 learning_rate=0.02,
-                max_power=0,
+                milestones=(1,),
                 evaluation_points=16,
                 seed=0,
                 batch_size=4,
@@ -383,7 +398,11 @@ class AcceleratedBackendTests(unittest.TestCase):
             fit_function_accelerated(
                 network,
                 bad_target,
-                config=AcceleratedTrainingConfig(max_power=1, batch_size=8, runtime=AcceleratedRuntime.numpy),
+                config=AcceleratedTrainingConfig(
+                    milestones=(1, 2),
+                    batch_size=8,
+                    runtime=AcceleratedRuntime.numpy,
+                ),
             )
 
     def test_fit_function_accelerated_rejects_wrong_sample_count(self):
@@ -401,7 +420,11 @@ class AcceleratedBackendTests(unittest.TestCase):
             fit_function_accelerated(
                 network,
                 bad_target,
-                config=AcceleratedTrainingConfig(max_power=1, batch_size=8, runtime=AcceleratedRuntime.numpy),
+                config=AcceleratedTrainingConfig(
+                    milestones=(1, 2),
+                    batch_size=8,
+                    runtime=AcceleratedRuntime.numpy,
+                ),
             )
 
     def test_reference_and_accelerated_match_for_batch_size_one(self):
@@ -426,7 +449,12 @@ class AcceleratedBackendTests(unittest.TestCase):
             reference_network,
             xs,
             ys,
-            config=TrainingConfig(learning_rate=0.02, max_power=7, evaluation_points=64, seed=0),
+            config=TrainingConfig(
+                learning_rate=0.02,
+                milestones=powers_of_two_milestones(7),
+                evaluation_points=64,
+                seed=0,
+            ),
             evaluation_inputs=xs,
             evaluation_targets=ys,
         )
@@ -436,7 +464,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             ys,
             config=AcceleratedTrainingConfig(
                 learning_rate=0.02,
-                max_power=7,
+                milestones=powers_of_two_milestones(7),
                 evaluation_points=64,
                 seed=0,
                 batch_size=1,
@@ -446,25 +474,79 @@ class AcceleratedBackendTests(unittest.TestCase):
             evaluation_targets=ys,
         )
 
-        self.assertEqual(reference_result.milestone_steps, accelerated_result.milestone_steps)
+        self.assertEqual(reference_result.milestones, accelerated_result.milestones)
         self.assertEqual(sorted(reference_result.snapshots), sorted(accelerated_result.snapshots))
         self.assertEqual(
-            reference_result.snapshots[reference_result.milestone_steps[-1]].shape,
-            accelerated_result.snapshots[accelerated_result.milestone_steps[-1]].shape,
+            reference_result.snapshots[reference_result.milestones[-1]].shape,
+            accelerated_result.snapshots[accelerated_result.milestones[-1]].shape,
         )
         self.assertTrue(
             np.allclose(
-                reference_result.snapshots[reference_result.milestone_steps[-1]],
-                accelerated_result.snapshots[accelerated_result.milestone_steps[-1]],
+                reference_result.snapshots[reference_result.milestones[-1]],
+                accelerated_result.snapshots[accelerated_result.milestones[-1]],
                 atol=1e-8,
                 rtol=1e-8,
             )
         )
         self.assertAlmostEqual(
-            reference_result.losses[reference_result.milestone_steps[-1]],
-            accelerated_result.losses[accelerated_result.milestone_steps[-1]],
+            reference_result.losses[reference_result.milestones[-1]],
+            accelerated_result.losses[accelerated_result.milestones[-1]],
             places=10,
         )
+
+    def test_accelerated_checkpoint_keys_match_across_batch_sizes(self):
+        xs = np.linspace(-1.0, 1.0, 64, dtype=float).reshape(-1, 1)
+        ys = np.sin(xs)
+        milestones = powers_of_two_milestones(7)
+
+        small_batch_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+        large_batch_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+
+        small_batch_result = fit_dataset_accelerated(
+            small_batch_network,
+            xs,
+            ys,
+            config=AcceleratedTrainingConfig(
+                learning_rate=0.02,
+                milestones=milestones,
+                evaluation_points=64,
+                seed=0,
+                batch_size=4,
+                runtime=AcceleratedRuntime.numpy,
+            ),
+            evaluation_inputs=xs,
+            evaluation_targets=ys,
+        )
+        large_batch_result = fit_dataset_accelerated(
+            large_batch_network,
+            xs,
+            ys,
+            config=AcceleratedTrainingConfig(
+                learning_rate=0.02,
+                milestones=milestones,
+                evaluation_points=64,
+                seed=0,
+                batch_size=32,
+                runtime=AcceleratedRuntime.numpy,
+            ),
+            evaluation_inputs=xs,
+            evaluation_targets=ys,
+        )
+
+        self.assertEqual(small_batch_result.milestones, large_batch_result.milestones)
+        self.assertEqual(sorted(small_batch_result.snapshots), sorted(large_batch_result.snapshots))
 
     def test_accelerated_fast_forward_pass_accepts_single_row_input(self):
         network = build_accelerated_network(
@@ -619,7 +701,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             ys,
             config=TrainingConfig(
                 learning_rate=0.02,
-                max_power=5,
+                milestones=powers_of_two_milestones(5),
                 evaluation_points=32,
                 seed=0,
             ),
@@ -632,7 +714,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             ys,
             config=AcceleratedTrainingConfig(
                 learning_rate=0.02,
-                max_power=5,
+                milestones=powers_of_two_milestones(5),
                 evaluation_points=32,
                 seed=0,
                 batch_size=1,
@@ -642,8 +724,8 @@ class AcceleratedBackendTests(unittest.TestCase):
             evaluation_targets=ys,
         )
 
-        reference_last_step = reference_result.milestone_steps[-1]
-        accelerated_last_step = accelerated_result.milestone_steps[-1]
+        reference_last_step = reference_result.milestones[-1]
+        accelerated_last_step = accelerated_result.milestones[-1]
         reference_expected_loss = float(
             loss_fn(
                 reference_result.evaluation_targets,
@@ -792,7 +874,7 @@ class AcceleratedBackendTests(unittest.TestCase):
                 network,
                 np.empty((0, 1), dtype=float),
                 np.empty((0, 1), dtype=float),
-                config=TrainingConfig(max_power=1, evaluation_points=8, seed=0),
+                config=TrainingConfig(milestones=(1, 2), evaluation_points=8, seed=0),
             )
 
     def test_fit_dataset_accelerated_rejects_empty_training_data(self):
@@ -810,7 +892,7 @@ class AcceleratedBackendTests(unittest.TestCase):
                 np.empty((0, 1), dtype=float),
                 np.empty((0, 1), dtype=float),
                 config=AcceleratedTrainingConfig(
-                    max_power=1,
+                    milestones=(1, 2),
                     evaluation_points=8,
                     seed=0,
                     batch_size=4,
@@ -833,7 +915,7 @@ class AcceleratedBackendTests(unittest.TestCase):
                 network,
                 xs,
                 ys,
-                config=TrainingConfig(max_power=1, evaluation_points=8, seed=0),
+                config=TrainingConfig(milestones=(1, 2), evaluation_points=8, seed=0),
                 evaluation_inputs=np.empty((0, 1), dtype=float),
                 evaluation_targets=np.empty((0, 1), dtype=float),
             )
@@ -855,7 +937,7 @@ class AcceleratedBackendTests(unittest.TestCase):
                 xs,
                 ys,
                 config=AcceleratedTrainingConfig(
-                    max_power=1,
+                    milestones=(1, 2),
                     evaluation_points=8,
                     seed=0,
                     batch_size=4,

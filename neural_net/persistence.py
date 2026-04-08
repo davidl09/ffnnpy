@@ -214,7 +214,7 @@ def _serialize_training_config(
     payload: dict[str, Any] = {
         "backend": backend,
         "learning_rate": float(training_config.learning_rate),
-        "max_power": int(training_config.max_power),
+        "milestones": [int(milestone) for milestone in training_config.milestones],
         "evaluation_points": int(training_config.evaluation_points),
         "seed": int(training_config.seed),
     }
@@ -281,7 +281,7 @@ def _deserialize_training_config(
         if backend == BACKEND_REFERENCE:
             return TrainingConfig(
                 learning_rate=float(metadata["learning_rate"]),
-                max_power=int(metadata["max_power"]),
+                milestones=tuple(int(milestone) for milestone in metadata["milestones"]),
                 evaluation_points=int(metadata["evaluation_points"]),
                 seed=int(metadata["seed"]),
             )
@@ -289,7 +289,7 @@ def _deserialize_training_config(
             runtime_value = metadata.get("runtime")
             return AcceleratedTrainingConfig(
                 learning_rate=float(metadata["learning_rate"]),
-                max_power=int(metadata["max_power"]),
+                milestones=tuple(int(milestone) for milestone in metadata["milestones"]),
                 evaluation_points=int(metadata["evaluation_points"]),
                 seed=int(metadata["seed"]),
                 batch_size=int(metadata["batch_size"]),
