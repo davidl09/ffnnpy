@@ -1,6 +1,9 @@
 import numpy as np
 
 from enum import Enum
+from typing import Any, Callable, Sequence
+
+OutputModifier = Callable[[np.ndarray], Any]
 
 class ActivationFunc(Enum):
     relu = "relu"
@@ -11,20 +14,51 @@ class ActivationFunc(Enum):
 class LossFunc(Enum):
     mse = "mse"
 
+
+def _coerce_activation_func(func: ActivationFunc | str) -> ActivationFunc:
+    if isinstance(func, ActivationFunc):
+        return func
+
+    try:
+        return ActivationFunc(func)
+    except ValueError as exc:
+        raise ValueError(f"Function {func} not supported") from exc
+
+
+def _normalize_activation_funcs(
+    activation_func: ActivationFunc | str | Sequence[ActivationFunc | str],
+    hidden_layer_count: int,
+) -> tuple[ActivationFunc, ...]:
+    if isinstance(activation_func, (ActivationFunc, str)):
+        activation = _coerce_activation_func(activation_func)
+        return tuple(activation for _ in range(hidden_layer_count))
+
+    activation_funcs = tuple(_coerce_activation_func(func) for func in activation_func)
+    if len(activation_funcs) != hidden_layer_count:
+        raise ValueError(
+            "activation_func sequence length must match hidden_layer_count"
+        )
+
+    return activation_funcs
+
+
 class FFNNConfig:
     input_layer_dim: int = 1
     hidden_layer_count: int = 3
     hidden_layer_shapes: np.ndarray = np.ones(hidden_layer_count, dtype=int)
-    activation_func: ActivationFunc = ActivationFunc.tanh
+    activation_func: ActivationFunc | tuple[ActivationFunc, ...] = ActivationFunc.tanh
+    layer_activation_funcs: tuple[ActivationFunc, ...] = (ActivationFunc.tanh,)
     loss_func: LossFunc = LossFunc.mse
+    output_modifier: OutputModifier | None = None
 
     def __init__(
         self,
         input_layer_dim: int = 1,
         hidden_layer_count: int = 3,
         hidden_layer_shapes: np.ndarray | list[int] | tuple[int, ...] | None = None,
-        activation_func: ActivationFunc = ActivationFunc.tanh,
-        loss_func: LossFunc = LossFunc.mse
+        activation_func: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
+        loss_func: LossFunc = LossFunc.mse,
+        output_modifier: OutputModifier | None = None,
     ):
         self.input_layer_dim = int(input_layer_dim)
         self.hidden_layer_count = int(hidden_layer_count)
@@ -42,8 +76,16 @@ class FFNNConfig:
             if np.any(self.hidden_layer_shapes < 1):
                 raise ValueError("hidden_layer_shapes entries must be at least 1")
 
-        self.activation_func = activation_func
+        self.layer_activation_funcs = _normalize_activation_funcs(
+            activation_func,
+            self.hidden_layer_count,
+        )
+        if isinstance(activation_func, (ActivationFunc, str)):
+            self.activation_func = self.layer_activation_funcs[0]
+        else:
+            self.activation_func = self.layer_activation_funcs
         self.loss_func = loss_func
+        self.output_modifier = output_modifier
 
 
 def get_loss_func(func: LossFunc):
@@ -77,6 +119,7 @@ def get_loss_func_derivative(func: LossFunc):
 
 
 def get_activation(func: ActivationFunc):
+    func = _coerce_activation_func(func)
     if func.value == "relu":
         def relu(x: np.ndarray):
             return np.maximum(x, 0)
@@ -104,6 +147,7 @@ def get_activation(func: ActivationFunc):
     raise ValueError(f"Function {func} not supported")
 
 def get_activation_derivative(func: ActivationFunc):
+    func = _coerce_activation_func(func)
     if func.value == "relu":
         def relu_derivative(x: np.ndarray):
             return (np.asarray(x) > 0).astype(float)
@@ -132,9 +176,49 @@ def get_activation_derivative(func: ActivationFunc):
     raise ValueError(f"Function {func} not supported")
 
 
+def _apply_output_modifier(
+    output_modifier: OutputModifier | None,
+    raw_output: np.ndarray,
+):
+    sample_output = np.array(raw_output, dtype=float, copy=True).reshape(-1)
+    if output_modifier is None:
+        return sample_output
+    return output_modifier(sample_output)
+
+
+def _apply_output_modifier_batch(
+    raw_outputs: np.ndarray,
+    output_modifier: OutputModifier | None,
+) -> np.ndarray:
+    output_rows = np.asarray(raw_outputs, dtype=float)
+    if output_rows.ndim == 1:
+        output_rows = output_rows.reshape(1, -1)
+
+    if output_modifier is None:
+        return output_rows
+
+    modified_outputs = [
+        np.asarray(_apply_output_modifier(output_modifier, sample_output))
+        for sample_output in output_rows
+    ]
+    expected_shape = modified_outputs[0].shape if modified_outputs else ()
+
+    for modified_output in modified_outputs[1:]:
+        if modified_output.shape != expected_shape:
+            raise ValueError(
+                "output_modifier must return values with a consistent shape for each sample"
+            )
+
+    if expected_shape == ():
+        return np.asarray([modified_output.item() for modified_output in modified_outputs])
+
+    return np.stack(modified_outputs, axis=0)
+
+
 class FFNN():
     def __init__(self, config: FFNNConfig):
         self.config = config
+        self.output_modifier = self.config.output_modifier
 
         self.pre_activations: np.ndarray = np.empty(self.config.hidden_layer_count, dtype = np.ndarray)
         self.values: np.ndarray          = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
@@ -148,41 +232,55 @@ class FFNN():
         for i in range(self.weights.shape[0]):
             self.weights[i] = np.random.random((self.config.hidden_layer_shapes[i], self.config.hidden_layer_shapes[i-1] if i-1 >= 0 else self.config.input_layer_dim)) #shape = (out, in)
 
-        self.activation = get_activation(self.config.activation_func)
+        self.activations = tuple(
+            get_activation(func) for func in self.config.layer_activation_funcs
+        )
+        self.activation_derivatives = tuple(
+            get_activation_derivative(func) for func in self.config.layer_activation_funcs
+        )
+        self.activation = (
+            self.activations[0]
+            if len(set(self.config.layer_activation_funcs)) == 1
+            else self.activations
+        )
 
-    def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
+    def _raw_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
         x = np.asarray(x_, dtype=np.float64).reshape(-1)
         if x.shape[0] != self.config.input_layer_dim:
             raise ValueError("input shape must match input layer shape")
         
         for i in range(self.config.hidden_layer_count):
             self.pre_activations[i] = self.weights[i] @ (self.values[i-1] if i-1 >= 0 else x) + self.biases[i]
-            self.values[i] = self.activation(self.pre_activations[i])
+            self.values[i] = self.activations[i](self.pre_activations[i])
             
         return self.values[-1]
+
+    def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]):
+        return _apply_output_modifier(self.output_modifier, self._raw_forward_pass(x_))
     
     def fast_backward_pass(self, x: np.ndarray, y_actual: np.ndarray, learning_rate: float):
         x = np.asarray(x, dtype=np.float64).reshape(-1)
-        y_pred = np.asarray(self.fast_forward_pass(x), dtype=np.float64).reshape(-1)
+        y_pred = np.asarray(self._raw_forward_pass(x), dtype=np.float64).reshape(-1)
         y_actual = np.asarray(y_actual, dtype=np.float64).reshape(-1)
         if y_actual.shape != y_pred.shape:
             raise ValueError("y_actual shape must match the network output shape")
 
         #last layer
         loss_deriv = get_loss_func_derivative(self.config.loss_func)
-        activation_deriv = get_activation_derivative(self.config.activation_func)
 
         deltas = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
         grad_weights = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
         grad_biases = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
 
-        deltas[-1] = loss_deriv(y_actual, y_pred) * activation_deriv(self.pre_activations[-1])
+        deltas[-1] = loss_deriv(y_actual, y_pred) * self.activation_derivatives[-1](self.pre_activations[-1])
         prev_activations = self.values[-2] if self.config.hidden_layer_count > 1 else x
         grad_weights[-1] = np.outer(deltas[-1], prev_activations)
         grad_biases[-1] = deltas[-1]
 
         for i in range(self.config.hidden_layer_count - 2, -1, -1):
-            deltas[i] = (self.weights[i + 1].T @ deltas[i + 1]) * activation_deriv(self.pre_activations[i])
+            deltas[i] = (
+                self.weights[i + 1].T @ deltas[i + 1]
+            ) * self.activation_derivatives[i](self.pre_activations[i])
             prev_activations = self.values[i - 1] if i - 1 >= 0 else x
             grad_weights[i] = np.outer(deltas[i], prev_activations)
             grad_biases[i] = deltas[i]
@@ -237,15 +335,22 @@ class FFNN():
             return f"[{shown}]"
 
         def _activation_text():
-            activation_name = getattr(self.config.activation_func, "value", self.config.activation_func)
+            activation_names = [func.value for func in self.config.layer_activation_funcs]
+            if len(set(self.config.layer_activation_funcs)) != 1:
+                return ", ".join(
+                    f"L{layer_index + 1}={activation_name}"
+                    for layer_index, activation_name in enumerate(activation_names)
+                )
+
+            activation_name = activation_names[0]
             if not callable(getattr(self, "activation", None)):
-                return str(activation_name)
+                return activation_name
 
             sample_points = np.array([0.0, 0.5, 1.0])
             try:
                 sample_values = np.asarray(self.activation(sample_points), dtype=float).reshape(-1)
             except Exception:
-                return str(activation_name)
+                return activation_name
 
             return f"{activation_name} -> {_vector_text(sample_values, limit=3)}"
 

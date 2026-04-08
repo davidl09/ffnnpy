@@ -9,12 +9,14 @@ from neural_net import (
     AcceleratedRuntime,
     AcceleratedTrainingConfig,
     ActivationFunc,
+    FFNNConfig,
     TrainingConfig,
     build_accelerated_network,
     build_random_network,
     fit_dataset,
     fit_dataset_accelerated,
     fit_function_accelerated,
+    predict_dataset,
     predict_dataset_accelerated,
 )
 from neural_net.backend import get_loss_func
@@ -24,6 +26,28 @@ HAS_NUMBA = importlib.util.find_spec("numba") is not None
 
 
 class AcceleratedBackendTests(unittest.TestCase):
+    def test_config_expands_single_activation_to_all_layers(self):
+        config = FFNNConfig(
+            input_layer_dim=1,
+            hidden_layer_count=3,
+            hidden_layer_shapes=(4, 4, 1),
+            activation_func=ActivationFunc.tanh,
+        )
+
+        self.assertEqual(
+            config.layer_activation_funcs,
+            (ActivationFunc.tanh, ActivationFunc.tanh, ActivationFunc.tanh),
+        )
+
+    def test_config_rejects_wrong_per_layer_activation_count(self):
+        with self.assertRaisesRegex(ValueError, "activation_func sequence length must match hidden_layer_count"):
+            FFNNConfig(
+                input_layer_dim=1,
+                hidden_layer_count=3,
+                hidden_layer_shapes=(4, 4, 1),
+                activation_func=(ActivationFunc.relu, ActivationFunc.tanh),
+            )
+
     def test_forward_batch_shape(self):
         network = build_accelerated_network(
             input_layer_dim=1,
@@ -203,6 +227,88 @@ class AcceleratedBackendTests(unittest.TestCase):
             accelerated_result.losses[accelerated_result.milestone_steps[-1]],
             places=10,
         )
+
+    def test_reference_and_accelerated_match_with_per_layer_activations(self):
+        activations = (
+            ActivationFunc.relu,
+            ActivationFunc.tanh,
+            ActivationFunc.sigmoid,
+        )
+        xs = np.linspace(-1.0, 1.0, 16, dtype=float).reshape(-1, 1)
+        ys = np.sin(xs)
+
+        reference_network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            seed=0,
+        )
+        accelerated_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+
+        self.assertTrue(
+            np.allclose(
+                predict_dataset(reference_network, xs),
+                predict_dataset_accelerated(accelerated_network, xs),
+                atol=1e-10,
+                rtol=1e-10,
+            )
+        )
+
+        reference_network.fast_backward_pass(xs[0], ys[0], 0.02)
+        accelerated_network.train_batch(xs[:1], ys[:1], 0.02, runtime=AcceleratedRuntime.numpy)
+
+        for reference_weights, accelerated_weights in zip(reference_network.weights, accelerated_network.weights):
+            self.assertTrue(np.allclose(reference_weights, accelerated_weights, atol=1e-10, rtol=1e-10))
+        for reference_biases, accelerated_biases in zip(reference_network.biases, accelerated_network.biases):
+            self.assertTrue(np.allclose(reference_biases, accelerated_biases, atol=1e-10, rtol=1e-10))
+
+    @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
+    def test_numba_mixed_activations_match_numpy(self):
+        activations = (
+            ActivationFunc.relu,
+            ActivationFunc.tanh,
+            ActivationFunc.sigmoid,
+        )
+        xs = np.linspace(-1.0, 1.0, 8, dtype=float).reshape(-1, 1)
+        ys = np.sin(xs)
+        numpy_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+        numba_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            seed=0,
+            runtime=AcceleratedRuntime.numba,
+        )
+
+        self.assertTrue(
+            np.allclose(
+                predict_dataset_accelerated(numpy_network, xs, runtime=AcceleratedRuntime.numpy),
+                predict_dataset_accelerated(numba_network, xs, runtime=AcceleratedRuntime.numba),
+                atol=1e-10,
+                rtol=1e-10,
+            )
+        )
+
+        numpy_predictions = numpy_network.train_batch(xs[:2], ys[:2], 0.02, runtime=AcceleratedRuntime.numpy)
+        numba_predictions = numba_network.train_batch(xs[:2], ys[:2], 0.02, runtime=AcceleratedRuntime.numba)
+
+        self.assertTrue(np.allclose(numpy_predictions, numba_predictions, atol=1e-10, rtol=1e-10))
+        for numpy_weights, numba_weights in zip(numpy_network.weights, numba_network.weights):
+            self.assertTrue(np.allclose(numpy_weights, numba_weights, atol=1e-10, rtol=1e-10))
+        for numpy_biases, numba_biases in zip(numpy_network.biases, numba_network.biases):
+            self.assertTrue(np.allclose(numpy_biases, numba_biases, atol=1e-10, rtol=1e-10))
 
     def test_numba_runtime_behavior_matches_environment(self):
         network = build_accelerated_network(

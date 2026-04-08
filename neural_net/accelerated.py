@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable, Sequence
 import time
 
 import numpy as np
 
-from .backend import ActivationFunc, FFNNConfig, LossFunc, get_loss_func
+from .backend import (
+    ActivationFunc,
+    FFNNConfig,
+    LossFunc,
+    _apply_output_modifier,
+    _apply_output_modifier_batch,
+    get_loss_func,
+)
 from .training import TrainingResult, _log_milestone, _network_shape_text, _normalize_samples
 
 try:
@@ -82,8 +89,14 @@ class AcceleratedFFNN:
         runtime: AcceleratedRuntime = AcceleratedRuntime.auto,
     ):
         self.config = config
+        self.output_modifier = self.config.output_modifier
         self.runtime = _coerce_runtime(runtime)
-        self.activation_code = _activation_code(self.config.activation_func)
+        self.activation_codes = np.ascontiguousarray(
+            np.array(
+                [_activation_code(func) for func in self.config.layer_activation_funcs],
+                dtype=np.int64,
+            )
+        )
 
         if self.config.loss_func is not LossFunc.mse:
             raise ValueError("AcceleratedFFNN currently supports only mse loss")
@@ -105,7 +118,7 @@ class AcceleratedFFNN:
         self._numba_weights = None
         self._numba_biases = None
 
-    def forward_batch(
+    def _forward_batch_raw(
         self,
         inputs: np.ndarray | list[float] | tuple[float, ...],
         *,
@@ -124,14 +137,14 @@ class AcceleratedFFNN:
                 self._numba_weights,
                 self._numba_biases,
                 np.ascontiguousarray(input_rows),
-                self.activation_code,
+                self.activation_codes,
             )
         else:
             outputs, pre_activations, values = _forward_batch_numpy(
                 self.weights,
                 self.biases,
                 input_rows,
-                self.config.activation_func,
+                self.config.layer_activation_funcs,
                 capture_intermediates=True,
             )
             self.pre_activations = pre_activations
@@ -142,15 +155,25 @@ class AcceleratedFFNN:
             self.weights,
             self.biases,
             input_rows,
-            self.config.activation_func,
+            self.config.layer_activation_funcs,
             capture_intermediates=True,
         )
         self.pre_activations = pre_activations
         self.values = values
         return outputs
 
-    def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
-        return self.forward_batch(x_).reshape(-1)
+    def forward_batch(
+        self,
+        inputs: np.ndarray | list[float] | tuple[float, ...],
+        *,
+        runtime: AcceleratedRuntime | str | None = None,
+    ) -> np.ndarray:
+        raw_outputs = self._forward_batch_raw(inputs, runtime=runtime)
+        return _apply_output_modifier_batch(raw_outputs, self.output_modifier)
+
+    def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]):
+        raw_output = self._forward_batch_raw(x_).reshape(-1)
+        return _apply_output_modifier(self.output_modifier, raw_output)
 
     def train_batch(
         self,
@@ -184,7 +207,7 @@ class AcceleratedFFNN:
                 np.ascontiguousarray(input_rows),
                 np.ascontiguousarray(target_rows),
                 float(learning_rate),
-                self.activation_code,
+                self.activation_codes,
             )
         else:
             predictions, pre_activations, values = _train_batch_numpy(
@@ -193,7 +216,7 @@ class AcceleratedFFNN:
                 input_rows,
                 target_rows,
                 float(learning_rate),
-                self.config.activation_func,
+                self.config.layer_activation_funcs,
             )
             self.pre_activations = pre_activations
             self.values = values
@@ -203,7 +226,7 @@ class AcceleratedFFNN:
             self.weights,
             self.biases,
             input_rows,
-            self.config.activation_func,
+            self.config.layer_activation_funcs,
             capture_intermediates=True,
         )
         self.pre_activations = pre_activations
@@ -245,15 +268,17 @@ def build_accelerated_network(
     *,
     input_layer_dim: int = 1,
     hidden_layer_shapes: tuple[int, ...] = (32, 32, 1),
-    activation: ActivationFunc = ActivationFunc.tanh,
+    activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
     seed: int = 0,
     runtime: AcceleratedRuntime = AcceleratedRuntime.auto,
+    output_modifier: Callable[[np.ndarray], Any] | None = None,
 ) -> AcceleratedFFNN:
     config = FFNNConfig(
         input_layer_dim=input_layer_dim,
         hidden_layer_count=len(hidden_layer_shapes),
         hidden_layer_shapes=hidden_layer_shapes,
         activation_func=activation,
+        output_modifier=output_modifier,
     )
     network = AcceleratedFFNN(config, runtime=runtime)
 
@@ -357,7 +382,7 @@ def fit_dataset_accelerated(
         network.train_batch(x_batch, y_batch, config.learning_rate, runtime=resolved_runtime)
 
         if step in milestone_set:
-            prediction = network.forward_batch(evaluation_inputs, runtime=resolved_runtime)
+            prediction = network._forward_batch_raw(evaluation_inputs, runtime=resolved_runtime)
             snapshots[step] = np.array(prediction, copy=True)
             losses[step] = float(loss_fn(evaluation_targets, prediction))
             _log_milestone(
@@ -431,7 +456,7 @@ def fit_function_accelerated(
         network.train_batch(x_batch, y_batch, config.learning_rate, runtime=resolved_runtime)
 
         if step in milestone_set:
-            prediction = network.forward_batch(evaluation_inputs, runtime=resolved_runtime)
+            prediction = network._forward_batch_raw(evaluation_inputs, runtime=resolved_runtime)
             snapshots[step] = np.array(prediction, copy=True)
             losses[step] = float(loss_fn(evaluation_targets, prediction))
             _log_milestone(
@@ -488,22 +513,27 @@ def _forward_batch_numpy(
     weights: list[np.ndarray],
     biases: list[np.ndarray],
     inputs: np.ndarray,
-    activation: ActivationFunc,
+    layer_activation_funcs: Sequence[ActivationFunc],
     *,
     capture_intermediates: bool,
 ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
     current = inputs
     pre_activations: list[np.ndarray] = []
-    activations: list[np.ndarray] = []
+    layer_outputs: list[np.ndarray] = []
 
-    for weights_layer, biases_layer in zip(weights, biases):
+    for weights_layer, biases_layer, activation in zip(
+        weights,
+        biases,
+        layer_activation_funcs,
+        strict=True,
+    ):
         pre_activation = current @ weights_layer.T + biases_layer
         current = _activate_numpy(pre_activation, activation)
         if capture_intermediates:
             pre_activations.append(pre_activation)
-            activations.append(current)
+            layer_outputs.append(current)
 
-    return current, pre_activations, activations
+    return current, pre_activations, layer_outputs
 
 
 def _train_batch_numpy(
@@ -512,33 +542,42 @@ def _train_batch_numpy(
     inputs: np.ndarray,
     targets: np.ndarray,
     learning_rate: float,
-    activation: ActivationFunc,
+    layer_activation_funcs: Sequence[ActivationFunc],
 ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
     layer_inputs: list[np.ndarray] = [inputs]
     pre_activations: list[np.ndarray] = []
-    activations: list[np.ndarray] = []
+    layer_outputs: list[np.ndarray] = []
     current = inputs
 
-    for weights_layer, biases_layer in zip(weights, biases):
+    for weights_layer, biases_layer, activation in zip(
+        weights,
+        biases,
+        layer_activation_funcs,
+        strict=True,
+    ):
         pre_activation = current @ weights_layer.T + biases_layer
         current = _activate_numpy(pre_activation, activation)
         pre_activations.append(pre_activation)
-        activations.append(current)
+        layer_outputs.append(current)
         layer_inputs.append(current)
 
-    predictions = activations[-1]
+    predictions = layer_outputs[-1]
     deltas: list[np.ndarray] = [np.zeros_like(pre_activation) for pre_activation in pre_activations]
     deltas[-1] = (
         (2.0 * (predictions - targets) / targets.shape[0])
-        * _activation_derivative_numpy(activation, activations[-1], pre_activations[-1])
+        * _activation_derivative_numpy(
+            layer_activation_funcs[-1],
+            layer_outputs[-1],
+            pre_activations[-1],
+        )
     )
 
     for layer_index in range(len(weights) - 2, -1, -1):
         deltas[layer_index] = (
             deltas[layer_index + 1] @ weights[layer_index + 1]
         ) * _activation_derivative_numpy(
-            activation,
-            activations[layer_index],
+            layer_activation_funcs[layer_index],
+            layer_outputs[layer_index],
             pre_activations[layer_index],
         )
 
@@ -546,7 +585,7 @@ def _train_batch_numpy(
         weights[layer_index] -= learning_rate * (deltas[layer_index].T @ layer_inputs[layer_index])
         biases[layer_index] -= learning_rate * deltas[layer_index].sum(axis=0)
 
-    return predictions, pre_activations, activations
+    return predictions, pre_activations, layer_outputs
 
 
 def _evaluate_vectorized_target(target_func, batch_inputs: np.ndarray) -> np.ndarray:
@@ -606,10 +645,18 @@ if njit is not None:
 
 
     @njit(cache=True)
-    def _forward_batch_numba(weights, biases, inputs: np.ndarray, activation_code: int) -> np.ndarray:
+    def _forward_batch_numba(
+        weights,
+        biases,
+        inputs: np.ndarray,
+        activation_codes: np.ndarray,
+    ) -> np.ndarray:
         current = inputs
         for layer_index in range(len(weights)):
-            current = _activate_numba(current @ weights[layer_index].T + biases[layer_index], activation_code)
+            current = _activate_numba(
+                current @ weights[layer_index].T + biases[layer_index],
+                activation_codes[layer_index],
+            )
         return current
 
 
@@ -620,7 +667,7 @@ if njit is not None:
         inputs: np.ndarray,
         targets: np.ndarray,
         learning_rate: float,
-        activation_code: int,
+        activation_codes: np.ndarray,
     ) -> np.ndarray:
         layer_inputs = NumbaList()
         pre_activations = NumbaList()
@@ -630,7 +677,7 @@ if njit is not None:
 
         for layer_index in range(len(weights)):
             pre_activation = current @ weights[layer_index].T + biases[layer_index]
-            current = _activate_numba(pre_activation, activation_code)
+            current = _activate_numba(pre_activation, activation_codes[layer_index])
             pre_activations.append(pre_activation)
             activations.append(current)
             layer_inputs.append(current)
@@ -642,7 +689,11 @@ if njit is not None:
 
         deltas[-1] = (
             (2.0 * (predictions - targets) / targets.shape[0])
-            * _activation_derivative_numba(activations[-1], pre_activations[-1], activation_code)
+            * _activation_derivative_numba(
+                activations[-1],
+                pre_activations[-1],
+                activation_codes[-1],
+            )
         )
 
         for layer_index in range(len(weights) - 2, -1, -1):
@@ -651,7 +702,7 @@ if njit is not None:
             ) * _activation_derivative_numba(
                 activations[layer_index],
                 pre_activations[layer_index],
-                activation_code,
+                activation_codes[layer_index],
             )
 
         for layer_index in range(len(weights)):
