@@ -10,13 +10,13 @@ The reference path stays intact for experimentation and teaching. The accelerate
 
 ## Setup
 
-Install the base environment:
+Install the base environment with the NumPy accelerated runtime:
 
 ```bash
 uv sync
 ```
 
-To enable the optional compiled runtime for the accelerated backend, install the accelerated extra:
+To enable the optional compiled Numba runtime for the accelerated backend, install the accelerated extra:
 
 ```bash
 uv sync --extra accelerated
@@ -170,7 +170,7 @@ result = fit_function(
 )
 ```
 
-This path performs one-sample updates and keeps the older `FFNN.fast_forward_pass(...)` and `FFNN.fast_backward_pass(...)` workflow unchanged.
+This path performs one-sample updates and keeps the older `FFNN.fast_forward_pass(...)` and `FFNN.fast_backward_pass(...)` workflow unchanged. `fit_function(...)` accepts either scalar Python callables such as `math.sin` or NumPy-vectorized callables such as `np.sin`.
 
 You can optionally attach an inference-only output modifier when you build the network:
 
@@ -218,7 +218,6 @@ result = fit_function_accelerated(
         evaluation_points=512,
         seed=0,
         batch_size=256,
-        runtime=AcceleratedRuntime.auto,
     ),
 )
 ```
@@ -228,6 +227,7 @@ Accelerated-path assumptions:
 - training uses mini-batch updates
 - milestone `updates` still mean optimizer steps, not individual samples
 - progress logs include batch size and total samples seen
+- omitting `AcceleratedTrainingConfig.runtime` makes training inherit `network.runtime`; setting it explicitly overrides the network for that fit call
 - `fit_function_accelerated(...)` requires a vectorized target function that accepts NumPy inputs and returns one scalar output per sample
 - `output_modifier` is inference-only; accelerated training and `train_batch(...)` still operate on the raw numeric outputs
 

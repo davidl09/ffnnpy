@@ -72,7 +72,7 @@ class AcceleratedTrainingConfig:
     evaluation_points: int = 512
     seed: int = 0
     batch_size: int = 256
-    runtime: AcceleratedRuntime = AcceleratedRuntime.auto
+    runtime: AcceleratedRuntime | None = None
 
     def __post_init__(self):
         if self.learning_rate <= 0:
@@ -84,7 +84,8 @@ class AcceleratedTrainingConfig:
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
-        object.__setattr__(self, "runtime", _coerce_runtime(self.runtime))
+        if self.runtime is not None:
+            object.__setattr__(self, "runtime", _coerce_runtime(self.runtime))
 
     @property
     def milestone_steps(self) -> tuple[int, ...]:
@@ -180,7 +181,18 @@ class AcceleratedFFNN:
         return _apply_output_modifier_batch(raw_outputs, self.output_modifier)
 
     def fast_forward_pass(self, x_: np.ndarray | list[float] | tuple[float, ...]):
-        raw_output = self._forward_batch_raw(x_).reshape(-1)
+        input_rows = _normalize_samples(
+            x_,
+            feature_dim=self.config.input_layer_dim,
+            name="x_",
+        ).astype(np.float64, copy=False)
+        if input_rows.shape[0] != 1:
+            raise ValueError(
+                "fast_forward_pass expects exactly one sample; "
+                "use forward_batch(...) or predict_dataset_accelerated(...) for batched inputs"
+            )
+
+        raw_output = self._forward_batch_raw(input_rows).reshape(-1)
         return _apply_output_modifier(self.output_modifier, raw_output)
 
     def train_batch(
@@ -350,6 +362,8 @@ def fit_dataset_accelerated(
 
     if train_inputs.shape[0] != train_targets.shape[0]:
         raise ValueError("train_inputs and train_targets must have the same number of samples")
+    if train_inputs.shape[0] == 0:
+        raise ValueError("train_inputs and train_targets must contain at least one sample")
 
     if evaluation_inputs is None:
         evaluation_inputs = train_inputs
@@ -369,6 +383,8 @@ def fit_dataset_accelerated(
 
     if evaluation_inputs.shape[0] != evaluation_targets.shape[0]:
         raise ValueError("evaluation_inputs and evaluation_targets must have the same number of samples")
+    if evaluation_inputs.shape[0] == 0:
+        raise ValueError("evaluation_inputs and evaluation_targets must contain at least one sample")
 
     rng = np.random.default_rng(config.seed + 1)
     milestones = config.milestone_steps
