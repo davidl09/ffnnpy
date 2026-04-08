@@ -220,7 +220,11 @@ def _serialize_training_config(
 
     if isinstance(training_config, AcceleratedTrainingConfig):
         payload["batch_size"] = int(training_config.batch_size)
-        payload["runtime"] = training_config.runtime.value
+        payload["runtime"] = (
+            training_config.runtime.value
+            if training_config.runtime is not None
+            else None
+        )
 
     return payload
 
@@ -279,13 +283,18 @@ def _deserialize_training_config(
                 seed=int(metadata["seed"]),
             )
         if backend == BACKEND_ACCELERATED:
+            runtime_value = metadata.get("runtime")
             return AcceleratedTrainingConfig(
                 learning_rate=float(metadata["learning_rate"]),
                 max_power=int(metadata["max_power"]),
                 evaluation_points=int(metadata["evaluation_points"]),
                 seed=int(metadata["seed"]),
                 batch_size=int(metadata["batch_size"]),
-                runtime=AcceleratedRuntime(metadata["runtime"]),
+                runtime=(
+                    None
+                    if runtime_value is None
+                    else AcceleratedRuntime(runtime_value)
+                ),
             )
     except KeyError as exc:
         raise ValueError(f"training_config metadata is missing '{exc.args[0]}'") from exc

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import unittest
 
 import numpy as np
@@ -16,6 +17,7 @@ from neural_net import (
     build_random_network,
     fit_dataset,
     fit_dataset_accelerated,
+    fit_function,
     fit_function_accelerated,
     predict_dataset,
     predict_dataset_accelerated,
@@ -145,6 +147,74 @@ class AcceleratedBackendTests(unittest.TestCase):
         final_loss = result.losses[result.milestone_steps[-1]]
         self.assertLess(final_loss, initial_loss)
 
+    def test_fit_function_reference_accepts_scalar_target(self):
+        network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(16, 16, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+        )
+        evaluation_inputs = np.linspace(-np.pi, np.pi, 256, dtype=float).reshape(-1, 1)
+        evaluation_targets = np.sin(evaluation_inputs)
+        loss_fn = get_loss_func(network.config.loss_func)
+        initial_loss = float(loss_fn(evaluation_targets, predict_dataset(network, evaluation_inputs)))
+
+        result = fit_function(
+            network,
+            math.sin,
+            config=TrainingConfig(
+                learning_rate=0.02,
+                max_power=9,
+                evaluation_points=256,
+                seed=0,
+            ),
+        )
+
+        final_loss = result.losses[result.milestone_steps[-1]]
+        self.assertLess(final_loss, initial_loss)
+
+    def test_fit_function_reference_accepts_vectorized_target(self):
+        network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(16, 16, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+        )
+
+        result = fit_function(
+            network,
+            np.sin,
+            config=TrainingConfig(
+                learning_rate=0.02,
+                max_power=7,
+                evaluation_points=64,
+                seed=0,
+            ),
+        )
+
+        self.assertEqual(
+            result.snapshots[result.milestone_steps[-1]].shape,
+            (64, 1),
+        )
+
+    def test_fit_function_reference_rejects_invalid_target(self):
+        network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+        )
+
+        def bad_target(_):
+            return np.array([0.0, 1.0], dtype=float)
+
+        with self.assertRaisesRegex(ValueError, "accept either a float and return a scalar"):
+            fit_function(
+                network,
+                bad_target,
+                config=TrainingConfig(max_power=1, evaluation_points=8, seed=0),
+            )
+
     def test_fit_function_accelerated_reduces_loss(self):
         network = build_accelerated_network(
             input_layer_dim=1,
@@ -172,6 +242,58 @@ class AcceleratedBackendTests(unittest.TestCase):
 
         final_loss = result.losses[result.milestone_steps[-1]]
         self.assertLess(final_loss, initial_loss)
+
+    def test_fit_dataset_accelerated_inherits_network_runtime_when_config_runtime_is_omitted(self):
+        network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+        xs = np.linspace(-1.0, 1.0, 16, dtype=float).reshape(-1, 1)
+        ys = np.sin(xs)
+
+        fit_dataset_accelerated(
+            network,
+            xs,
+            ys,
+            config=AcceleratedTrainingConfig(
+                learning_rate=0.02,
+                max_power=0,
+                evaluation_points=16,
+                seed=0,
+                batch_size=4,
+            ),
+        )
+
+        self.assertIsNone(network._numba_weights)
+        self.assertIsNone(network._numba_biases)
+
+    def test_fit_function_accelerated_explicit_runtime_overrides_network_runtime(self):
+        network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+            runtime=AcceleratedRuntime.numba,
+        )
+
+        fit_function_accelerated(
+            network,
+            np.sin,
+            config=AcceleratedTrainingConfig(
+                learning_rate=0.02,
+                max_power=0,
+                evaluation_points=16,
+                seed=0,
+                batch_size=4,
+                runtime=AcceleratedRuntime.numpy,
+            ),
+        )
+
+        self.assertIsNone(network._numba_weights)
+        self.assertIsNone(network._numba_biases)
 
     def test_fit_function_accelerated_rejects_non_vectorized_target(self):
         network = build_accelerated_network(
@@ -270,6 +392,36 @@ class AcceleratedBackendTests(unittest.TestCase):
             accelerated_result.losses[accelerated_result.milestone_steps[-1]],
             places=10,
         )
+
+    def test_accelerated_fast_forward_pass_accepts_single_row_input(self):
+        network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+        sample = np.array([0.25], dtype=float)
+        sample_row = sample.reshape(1, -1)
+
+        output_vector = np.asarray(network.fast_forward_pass(sample), dtype=float)
+        output_row = np.asarray(network.fast_forward_pass(sample_row), dtype=float)
+
+        self.assertTrue(np.allclose(output_vector, output_row, atol=1e-10, rtol=1e-10))
+
+    def test_accelerated_fast_forward_pass_rejects_batched_input(self):
+        network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+
+        with self.assertRaisesRegex(ValueError, "expects exactly one sample"):
+            network.fast_forward_pass(
+                np.array([[0.0], [1.0]], dtype=float)
+            )
 
     def test_reference_and_accelerated_match_with_per_layer_activations(self):
         activations = (
@@ -455,6 +607,92 @@ class AcceleratedBackendTests(unittest.TestCase):
         else:
             with self.assertRaisesRegex(RuntimeError, "numba is not installed"):
                 predict_dataset_accelerated(network, xs, runtime=AcceleratedRuntime.numba)
+
+    def test_fit_dataset_rejects_empty_training_data(self):
+        network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "contain at least one sample"):
+            fit_dataset(
+                network,
+                np.empty((0, 1), dtype=float),
+                np.empty((0, 1), dtype=float),
+                config=TrainingConfig(max_power=1, evaluation_points=8, seed=0),
+            )
+
+    def test_fit_dataset_accelerated_rejects_empty_training_data(self):
+        network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+
+        with self.assertRaisesRegex(ValueError, "contain at least one sample"):
+            fit_dataset_accelerated(
+                network,
+                np.empty((0, 1), dtype=float),
+                np.empty((0, 1), dtype=float),
+                config=AcceleratedTrainingConfig(
+                    max_power=1,
+                    evaluation_points=8,
+                    seed=0,
+                    batch_size=4,
+                    runtime=AcceleratedRuntime.numpy,
+                ),
+            )
+
+    def test_fit_dataset_rejects_empty_evaluation_data(self):
+        network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+        )
+        xs = np.linspace(-1.0, 1.0, 8, dtype=float).reshape(-1, 1)
+        ys = np.sin(xs)
+
+        with self.assertRaisesRegex(ValueError, "contain at least one sample"):
+            fit_dataset(
+                network,
+                xs,
+                ys,
+                config=TrainingConfig(max_power=1, evaluation_points=8, seed=0),
+                evaluation_inputs=np.empty((0, 1), dtype=float),
+                evaluation_targets=np.empty((0, 1), dtype=float),
+            )
+
+    def test_fit_dataset_accelerated_rejects_empty_evaluation_data(self):
+        network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=ActivationFunc.tanh,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+        xs = np.linspace(-1.0, 1.0, 8, dtype=float).reshape(-1, 1)
+        ys = np.sin(xs)
+
+        with self.assertRaisesRegex(ValueError, "contain at least one sample"):
+            fit_dataset_accelerated(
+                network,
+                xs,
+                ys,
+                config=AcceleratedTrainingConfig(
+                    max_power=1,
+                    evaluation_points=8,
+                    seed=0,
+                    batch_size=4,
+                    runtime=AcceleratedRuntime.numpy,
+                ),
+                evaluation_inputs=np.empty((0, 1), dtype=float),
+                evaluation_targets=np.empty((0, 1), dtype=float),
+            )
 
 
 if __name__ == "__main__":

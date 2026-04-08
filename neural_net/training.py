@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 
 
 DEFAULT_DOMAIN = (-np.pi, np.pi)
+_REFERENCE_TARGET_FUNC_ERROR = (
+    "fit_function requires target_func to accept either a float and return a scalar, "
+    "or a NumPy batch input and return one scalar output per sample"
+)
 
 
 class AsyncProgressPrinter:
@@ -167,6 +171,8 @@ def fit_dataset(
 
     if train_inputs.shape[0] != train_targets.shape[0]:
         raise ValueError("train_inputs and train_targets must have the same number of samples")
+    if train_inputs.shape[0] == 0:
+        raise ValueError("train_inputs and train_targets must contain at least one sample")
 
     if evaluation_inputs is None:
         evaluation_inputs = train_inputs
@@ -186,6 +192,8 @@ def fit_dataset(
 
     if evaluation_inputs.shape[0] != evaluation_targets.shape[0]:
         raise ValueError("evaluation_inputs and evaluation_targets must have the same number of samples")
+    if evaluation_inputs.shape[0] == 0:
+        raise ValueError("evaluation_inputs and evaluation_targets must contain at least one sample")
 
     rng = np.random.default_rng(config.seed + 1)
     milestones = config.milestone_steps
@@ -258,10 +266,7 @@ def fit_function(
         config.evaluation_points,
         dtype=float,
     ).reshape(-1, 1)
-    evaluation_targets = np.asarray(
-        target_func(evaluation_inputs[:, 0]),
-        dtype=float,
-    ).reshape(-1, 1)
+    evaluation_targets = _evaluate_reference_target(target_func, evaluation_inputs[:, 0])
 
     snapshots: dict[int, np.ndarray] = {}
     losses: dict[int, float] = {}
@@ -279,7 +284,12 @@ def fit_function(
 
     for step in range(1, milestones[-1] + 1):
         x_sample = rng.uniform(domain[0], domain[1])
-        y_sample = float(np.asarray(target_func(np.array([x_sample], dtype=float))).reshape(-1)[0])
+        y_sample = float(
+            _evaluate_reference_target(
+                target_func,
+                np.array([x_sample], dtype=float),
+            )[0, 0]
+        )
         network.fast_backward_pass(
             np.array([x_sample], dtype=float),
             np.array([y_sample], dtype=float),
@@ -326,6 +336,45 @@ def _normalize_samples(values: np.ndarray, *, feature_dim: int, name: str) -> np
         raise ValueError(f"{name} must have shape (n_samples, {feature_dim})")
 
     return array
+
+
+def _evaluate_reference_target(target_func, inputs: np.ndarray) -> np.ndarray:
+    sample_inputs = np.asarray(inputs, dtype=float).reshape(-1)
+
+    try:
+        vectorized_targets = _normalize_samples(
+            np.asarray(target_func(sample_inputs), dtype=float),
+            feature_dim=1,
+            name="target_func(inputs)",
+        )
+    except Exception:
+        vectorized_targets = None
+    else:
+        if vectorized_targets.shape[0] == sample_inputs.shape[0]:
+            return vectorized_targets.astype(float, copy=False)
+
+    scalar_targets: list[float] = []
+    try:
+        for sample in sample_inputs:
+            scalar_targets.append(
+                _coerce_scalar_target_output(target_func(float(sample)))
+            )
+    except Exception as exc:
+        raise ValueError(_REFERENCE_TARGET_FUNC_ERROR) from exc
+
+    return np.asarray(scalar_targets, dtype=float).reshape(-1, 1)
+
+
+def _coerce_scalar_target_output(raw_output) -> float:
+    output = np.asarray(raw_output, dtype=float)
+    if output.ndim == 0:
+        return float(output)
+
+    flat_output = output.reshape(-1)
+    if flat_output.size != 1:
+        raise ValueError(_REFERENCE_TARGET_FUNC_ERROR)
+
+    return float(flat_output[0])
 
 
 def _network_shape_text(network: FFNN) -> str:

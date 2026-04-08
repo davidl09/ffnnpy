@@ -181,6 +181,33 @@ class PersistenceTests(unittest.TestCase):
             )
         )
 
+    def test_accelerated_round_trip_preserves_training_config_without_runtime_override(self):
+        network = build_accelerated_network(
+            input_layer_dim=2,
+            hidden_layer_shapes=(5, 2),
+            activation=("tanh", "sigmoid"),
+            loss_func=LossFunc.cross_entropy,
+            seed=3,
+            runtime=AcceleratedRuntime.numpy,
+        )
+        training_config = AcceleratedTrainingConfig(
+            learning_rate=0.04,
+            max_power=7,
+            evaluation_points=32,
+            seed=13,
+            batch_size=9,
+            runtime=None,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "accelerated-no-runtime.ffnnpy"
+            save_network(network, path, training_config=training_config)
+            artifact = load_network(path)
+
+        self.assertEqual(artifact.backend, "accelerated")
+        self.assertEqual(artifact.training_config, training_config)
+        self.assertIsNone(artifact.training_config.runtime)
+
     def test_registered_output_modifier_round_trips(self):
         network = build_random_network(
             input_layer_dim=1,
