@@ -74,6 +74,7 @@ from neural_net import (
     FFNN,
     FFNNConfig,
     LoadedNetworkArtifact,
+    LossFunc,
     TrainingConfig,
     TrainingResult,
     build_accelerated_network,
@@ -89,6 +90,9 @@ from neural_net import (
     save_network,
 )
 ```
+
+The high-level builders accept `loss_func=...`. Supported values are `LossFunc.mse` and
+`LossFunc.cross_entropy`. Cross-entropy requires a sigmoid output layer and targets in `[0, 1]`.
 
 ## Model Persistence
 

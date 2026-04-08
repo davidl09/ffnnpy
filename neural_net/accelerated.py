@@ -29,6 +29,8 @@ _ACTIVATION_RELU = 0
 _ACTIVATION_TANH = 1
 _ACTIVATION_SIGMOID = 2
 _ACTIVATION_INV_QUAD = 3
+_LOSS_MSE = 0
+_LOSS_CROSS_ENTROPY = 1
 
 
 class AcceleratedRuntime(Enum):
@@ -53,6 +55,14 @@ def _activation_code(activation: ActivationFunc) -> int:
     if activation is ActivationFunc.inv_quad:
         return _ACTIVATION_INV_QUAD
     raise ValueError(f"Activation {activation} not supported")
+
+
+def _loss_code(loss_func: LossFunc) -> int:
+    if loss_func is LossFunc.mse:
+        return _LOSS_MSE
+    if loss_func is LossFunc.cross_entropy:
+        return _LOSS_CROSS_ENTROPY
+    raise ValueError(f"Loss {loss_func} not supported")
 
 
 @dataclass(frozen=True)
@@ -97,9 +107,7 @@ class AcceleratedFFNN:
                 dtype=np.int64,
             )
         )
-
-        if self.config.loss_func is not LossFunc.mse:
-            raise ValueError("AcceleratedFFNN currently supports only mse loss")
+        self.loss_code = _loss_code(self.config.loss_func)
 
         self.weights: list[np.ndarray] = []
         self.biases: list[np.ndarray] = []
@@ -198,6 +206,9 @@ class AcceleratedFFNN:
         if input_rows.shape[0] != target_rows.shape[0]:
             raise ValueError("inputs and targets must have the same number of samples")
 
+        if self.config.loss_func is LossFunc.cross_entropy:
+            _validate_cross_entropy_targets_numpy(target_rows)
+
         resolved_runtime = self.resolve_runtime(runtime)
         if resolved_runtime is AcceleratedRuntime.numba:
             self._ensure_numba_lists()
@@ -208,6 +219,7 @@ class AcceleratedFFNN:
                 np.ascontiguousarray(target_rows),
                 float(learning_rate),
                 self.activation_codes,
+                self.loss_code,
             )
         else:
             predictions, pre_activations, values = _train_batch_numpy(
@@ -217,6 +229,7 @@ class AcceleratedFFNN:
                 target_rows,
                 float(learning_rate),
                 self.config.layer_activation_funcs,
+                self.config.loss_func,
             )
             self.pre_activations = pre_activations
             self.values = values
@@ -269,6 +282,7 @@ def build_accelerated_network(
     input_layer_dim: int = 1,
     hidden_layer_shapes: tuple[int, ...] = (32, 32, 1),
     activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
+    loss_func: LossFunc | str = LossFunc.mse,
     seed: int = 0,
     runtime: AcceleratedRuntime = AcceleratedRuntime.auto,
     output_modifier: Callable[[np.ndarray], Any] | None = None,
@@ -278,6 +292,7 @@ def build_accelerated_network(
         hidden_layer_count=len(hidden_layer_shapes),
         hidden_layer_shapes=hidden_layer_shapes,
         activation_func=activation,
+        loss_func=loss_func,
         output_modifier=output_modifier,
     )
     network = AcceleratedFFNN(config, runtime=runtime)
@@ -509,6 +524,41 @@ def _activation_derivative_numpy(
     raise ValueError(f"Activation {activation} not supported")
 
 
+def _validate_cross_entropy_targets_numpy(targets: np.ndarray) -> None:
+    if np.any(~np.isfinite(targets)) or np.any((targets < 0.0) | (targets > 1.0)):
+        raise ValueError("cross_entropy targets must be finite and lie in [0, 1]")
+
+
+def _validate_cross_entropy_predictions_numpy(predictions: np.ndarray) -> None:
+    if np.any(~np.isfinite(predictions)) or np.any((predictions < 0.0) | (predictions > 1.0)):
+        raise ValueError("cross_entropy predictions must be finite and lie in [0, 1]")
+
+
+def _output_delta_numpy(
+    loss_func: LossFunc,
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    output_activation: ActivationFunc,
+    activated_output: np.ndarray,
+    pre_activated_output: np.ndarray,
+) -> np.ndarray:
+    scale = float(targets.size)
+    if loss_func is LossFunc.cross_entropy:
+        if output_activation is not ActivationFunc.sigmoid:
+            raise ValueError("cross_entropy loss requires a sigmoid output activation")
+        _validate_cross_entropy_predictions_numpy(predictions)
+        return (predictions - targets) / scale
+
+    return (
+        (2.0 * (predictions - targets) / scale)
+        * _activation_derivative_numpy(
+            output_activation,
+            activated_output,
+            pre_activated_output,
+        )
+    )
+
+
 def _forward_batch_numpy(
     weights: list[np.ndarray],
     biases: list[np.ndarray],
@@ -543,6 +593,7 @@ def _train_batch_numpy(
     targets: np.ndarray,
     learning_rate: float,
     layer_activation_funcs: Sequence[ActivationFunc],
+    loss_func: LossFunc,
 ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
     layer_inputs: list[np.ndarray] = [inputs]
     pre_activations: list[np.ndarray] = []
@@ -563,13 +614,13 @@ def _train_batch_numpy(
 
     predictions = layer_outputs[-1]
     deltas: list[np.ndarray] = [np.zeros_like(pre_activation) for pre_activation in pre_activations]
-    deltas[-1] = (
-        (2.0 * (predictions - targets) / targets.shape[0])
-        * _activation_derivative_numpy(
-            layer_activation_funcs[-1],
-            layer_outputs[-1],
-            pre_activations[-1],
-        )
+    deltas[-1] = _output_delta_numpy(
+        loss_func,
+        predictions,
+        targets,
+        layer_activation_funcs[-1],
+        layer_outputs[-1],
+        pre_activations[-1],
     )
 
     for layer_index in range(len(weights) - 2, -1, -1):
@@ -668,6 +719,7 @@ if njit is not None:
         targets: np.ndarray,
         learning_rate: float,
         activation_codes: np.ndarray,
+        loss_code: int,
     ) -> np.ndarray:
         layer_inputs = NumbaList()
         pre_activations = NumbaList()
@@ -687,14 +739,17 @@ if njit is not None:
         for layer_index in range(len(weights)):
             deltas.append(np.zeros_like(pre_activations[layer_index]))
 
-        deltas[-1] = (
-            (2.0 * (predictions - targets) / targets.shape[0])
-            * _activation_derivative_numba(
-                activations[-1],
-                pre_activations[-1],
-                activation_codes[-1],
+        if loss_code == _LOSS_CROSS_ENTROPY:
+            deltas[-1] = (predictions - targets) / targets.size
+        else:
+            deltas[-1] = (
+                (2.0 * (predictions - targets) / targets.size)
+                * _activation_derivative_numba(
+                    activations[-1],
+                    pre_activations[-1],
+                    activation_codes[-1],
+                )
             )
-        )
 
         for layer_index in range(len(weights) - 2, -1, -1):
             deltas[layer_index] = (

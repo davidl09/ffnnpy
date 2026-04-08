@@ -11,6 +11,7 @@ from neural_net import (
     AcceleratedRuntime,
     AcceleratedTrainingConfig,
     LoadedNetworkArtifact,
+    LossFunc,
     TrainingConfig,
     build_accelerated_network,
     build_random_network,
@@ -40,6 +41,7 @@ class PersistenceTests(unittest.TestCase):
                 "tanh",
                 "sigmoid",
             ),
+            loss_func=LossFunc.cross_entropy,
             seed=7,
         )
         training_config = TrainingConfig(
@@ -78,6 +80,7 @@ class PersistenceTests(unittest.TestCase):
             loaded_network.config.layer_activation_funcs,
             network.config.layer_activation_funcs,
         )
+        self.assertIs(loaded_network.config.loss_func, LossFunc.cross_entropy)
 
         for layer_index in range(network.config.hidden_layer_count):
             self.assertTrue(
@@ -111,6 +114,7 @@ class PersistenceTests(unittest.TestCase):
             input_layer_dim=2,
             hidden_layer_shapes=(5, 2),
             activation=("tanh", "sigmoid"),
+            loss_func=LossFunc.cross_entropy,
             seed=3,
             runtime=AcceleratedRuntime.numpy,
         )
@@ -142,6 +146,7 @@ class PersistenceTests(unittest.TestCase):
 
         loaded_network = artifact.network
         self.assertEqual(loaded_network.runtime, AcceleratedRuntime.numpy)
+        self.assertIs(loaded_network.config.loss_func, LossFunc.cross_entropy)
         self.assertIsNone(loaded_network._numba_weights)
         self.assertIsNone(loaded_network._numba_biases)
 
