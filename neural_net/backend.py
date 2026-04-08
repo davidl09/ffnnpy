@@ -13,6 +13,10 @@ class ActivationFunc(Enum):
 
 class LossFunc(Enum):
     mse = "mse"
+    cross_entropy = "cross_entropy"
+
+
+_LOSS_EPSILON = np.finfo(np.float64).eps
 
 
 def _coerce_activation_func(func: ActivationFunc | str) -> ActivationFunc:
@@ -23,6 +27,16 @@ def _coerce_activation_func(func: ActivationFunc | str) -> ActivationFunc:
         return ActivationFunc(func)
     except ValueError as exc:
         raise ValueError(f"Function {func} not supported") from exc
+
+
+def _coerce_loss_func(func: LossFunc | str) -> LossFunc:
+    if isinstance(func, LossFunc):
+        return func
+
+    try:
+        return LossFunc(func)
+    except ValueError as exc:
+        raise ValueError(f"Loss function {func} not supported") from exc
 
 
 def _normalize_activation_funcs(
@@ -57,7 +71,7 @@ class FFNNConfig:
         hidden_layer_count: int = 3,
         hidden_layer_shapes: np.ndarray | list[int] | tuple[int, ...] | None = None,
         activation_func: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
-        loss_func: LossFunc = LossFunc.mse,
+        loss_func: LossFunc | str = LossFunc.mse,
         output_modifier: OutputModifier | None = None,
     ):
         self.input_layer_dim = int(input_layer_dim)
@@ -84,36 +98,83 @@ class FFNNConfig:
             self.activation_func = self.layer_activation_funcs[0]
         else:
             self.activation_func = self.layer_activation_funcs
-        self.loss_func = loss_func
+        self.loss_func = _coerce_loss_func(loss_func)
+        if (
+            self.loss_func is LossFunc.cross_entropy
+            and self.layer_activation_funcs[-1] is not ActivationFunc.sigmoid
+        ):
+            raise ValueError("cross_entropy loss requires a sigmoid output activation")
         self.output_modifier = output_modifier
 
 
-def get_loss_func(func: LossFunc):
-    if func.value == "mse":
+def _normalize_loss_arrays(
+    y: np.ndarray,
+    y_hat: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    y = np.asarray(y, dtype=float).reshape(-1)
+    y_hat = np.asarray(y_hat, dtype=float).reshape(-1)
+    if y.shape != y_hat.shape:
+        raise ValueError("y and y_hat must have the same shape")
+    if y.size == 0:
+        raise ValueError("y and y_hat must be non-empty")
+    return y, y_hat
+
+
+def _validate_cross_entropy_targets(targets: np.ndarray) -> None:
+    if np.any(~np.isfinite(targets)) or np.any((targets < 0.0) | (targets > 1.0)):
+        raise ValueError("cross_entropy targets must be finite and lie in [0, 1]")
+
+
+def _validate_cross_entropy_predictions(predictions: np.ndarray) -> None:
+    if np.any(~np.isfinite(predictions)) or np.any((predictions < 0.0) | (predictions > 1.0)):
+        raise ValueError("cross_entropy predictions must be finite and lie in [0, 1]")
+
+
+def _clip_cross_entropy_predictions(predictions: np.ndarray) -> np.ndarray:
+    _validate_cross_entropy_predictions(predictions)
+    return np.clip(predictions, _LOSS_EPSILON, 1.0 - _LOSS_EPSILON)
+
+
+def get_loss_func(func: LossFunc | str):
+    func = _coerce_loss_func(func)
+    if func is LossFunc.mse:
         def mse(y: np.ndarray, y_hat: np.ndarray):
-            y = np.asarray(y, dtype=float).reshape(-1)
-            y_hat = np.asarray(y_hat, dtype=float).reshape(-1)
-            if y.shape != y_hat.shape:
-                raise ValueError("y and y_hat must have the same shape")
-            if y.size == 0:
-                raise ValueError("y and y_hat must be non-empty")
+            y, y_hat = _normalize_loss_arrays(y, y_hat)
             return np.mean((y - y_hat) ** 2)
         return mse
+    if func is LossFunc.cross_entropy:
+        def cross_entropy(y: np.ndarray, y_hat: np.ndarray):
+            y, y_hat = _normalize_loss_arrays(y, y_hat)
+            _validate_cross_entropy_targets(y)
+            clipped_predictions = _clip_cross_entropy_predictions(y_hat)
+            return -np.mean(
+                y * np.log(clipped_predictions)
+                + (1.0 - y) * np.log(1.0 - clipped_predictions)
+            )
+
+        return cross_entropy
     raise ValueError(f"Loss function {func} not supported")
 
 
-def get_loss_func_derivative(func: LossFunc):
-    if func.value == "mse":
+def get_loss_func_derivative(func: LossFunc | str):
+    func = _coerce_loss_func(func)
+    if func is LossFunc.mse:
         def mse_derivative(y: np.ndarray, y_hat: np.ndarray):
-            y = np.asarray(y, dtype=float).reshape(-1)
-            y_hat = np.asarray(y_hat, dtype=float).reshape(-1)
-            if y.shape != y_hat.shape:
-                raise ValueError("y and y_hat must have the same shape")
-            if y.size == 0:
-                raise ValueError("y and y_hat must be non-empty")
+            y, y_hat = _normalize_loss_arrays(y, y_hat)
             return 2 * (y_hat - y) / y.size
 
         return mse_derivative
+    if func is LossFunc.cross_entropy:
+        def cross_entropy_derivative(y: np.ndarray, y_hat: np.ndarray):
+            y, y_hat = _normalize_loss_arrays(y, y_hat)
+            _validate_cross_entropy_targets(y)
+            clipped_predictions = _clip_cross_entropy_predictions(y_hat)
+            return (
+                ((1.0 - y) / (1.0 - clipped_predictions))
+                - (y / clipped_predictions)
+            ) / y.size
+
+        return cross_entropy_derivative
 
     raise ValueError(f"Loss function {func} not supported")
 
@@ -272,7 +333,15 @@ class FFNN():
         grad_weights = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
         grad_biases = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
 
-        deltas[-1] = loss_deriv(y_actual, y_pred) * self.activation_derivatives[-1](self.pre_activations[-1])
+        if self.config.loss_func is LossFunc.cross_entropy:
+            _validate_cross_entropy_targets(y_actual)
+            _validate_cross_entropy_predictions(y_pred)
+            deltas[-1] = (y_pred - y_actual) / y_actual.size
+        else:
+            deltas[-1] = (
+                loss_deriv(y_actual, y_pred)
+                * self.activation_derivatives[-1](self.pre_activations[-1])
+            )
         prev_activations = self.values[-2] if self.config.hidden_layer_count > 1 else x
         grad_weights[-1] = np.outer(deltas[-1], prev_activations)
         grad_biases[-1] = deltas[-1]

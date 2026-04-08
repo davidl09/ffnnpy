@@ -13,6 +13,7 @@ from .backend import (
     ActivationFunc,
     FFNN,
     FFNNConfig,
+    LossFunc,
     _apply_output_modifier_batch,
     get_loss_func,
 )
@@ -93,6 +94,7 @@ def build_random_network(
     input_layer_dim: int = 1,
     hidden_layer_shapes: tuple[int, ...] = (32, 32, 1),
     activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
+    loss_func: LossFunc | str = LossFunc.mse,
     seed: int = 0,
     output_modifier: Callable[[np.ndarray], Any] | None = None,
 ) -> FFNN:
@@ -101,6 +103,7 @@ def build_random_network(
         hidden_layer_count=len(hidden_layer_shapes),
         hidden_layer_shapes=hidden_layer_shapes,
         activation_func=activation,
+        loss_func=loss_func,
         output_modifier=output_modifier,
     )
     network = FFNN(config)

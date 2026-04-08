@@ -10,6 +10,7 @@ from neural_net import (
     AcceleratedTrainingConfig,
     ActivationFunc,
     FFNNConfig,
+    LossFunc,
     TrainingConfig,
     build_accelerated_network,
     build_random_network,
@@ -47,6 +48,48 @@ class AcceleratedBackendTests(unittest.TestCase):
                 hidden_layer_shapes=(4, 4, 1),
                 activation_func=(ActivationFunc.relu, ActivationFunc.tanh),
             )
+
+    def test_config_rejects_cross_entropy_without_sigmoid_output(self):
+        with self.assertRaisesRegex(ValueError, "sigmoid output activation"):
+            FFNNConfig(
+                input_layer_dim=1,
+                hidden_layer_count=2,
+                hidden_layer_shapes=(4, 1),
+                activation_func=(ActivationFunc.tanh, ActivationFunc.tanh),
+                loss_func=LossFunc.cross_entropy,
+            )
+
+    def test_builders_expose_public_loss_selection(self):
+        reference_network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(4, 1),
+            activation=(ActivationFunc.tanh, ActivationFunc.sigmoid),
+            loss_func="cross_entropy",
+            seed=0,
+        )
+        accelerated_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(4, 1),
+            activation=(ActivationFunc.tanh, ActivationFunc.sigmoid),
+            loss_func=LossFunc.cross_entropy,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+
+        self.assertIs(reference_network.config.loss_func, LossFunc.cross_entropy)
+        self.assertIs(accelerated_network.config.loss_func, LossFunc.cross_entropy)
+
+    def test_cross_entropy_loss_matches_manual_formula(self):
+        targets = np.array([[1.0], [0.0], [1.0]], dtype=float)
+        predictions = np.array([[0.9], [0.2], [0.8]], dtype=float)
+        expected = -np.mean(
+            targets.reshape(-1) * np.log(predictions.reshape(-1))
+            + (1.0 - targets.reshape(-1)) * np.log(1.0 - predictions.reshape(-1))
+        )
+
+        loss_fn = get_loss_func(LossFunc.cross_entropy)
+
+        self.assertAlmostEqual(float(loss_fn(targets, predictions)), float(expected), places=12)
 
     def test_forward_batch_shape(self):
         network = build_accelerated_network(
@@ -268,6 +311,48 @@ class AcceleratedBackendTests(unittest.TestCase):
         for reference_biases, accelerated_biases in zip(reference_network.biases, accelerated_network.biases):
             self.assertTrue(np.allclose(reference_biases, accelerated_biases, atol=1e-10, rtol=1e-10))
 
+    def test_reference_and_accelerated_match_with_cross_entropy(self):
+        activations = (
+            ActivationFunc.relu,
+            ActivationFunc.tanh,
+            ActivationFunc.sigmoid,
+        )
+        xs = np.linspace(-1.0, 1.0, 16, dtype=float).reshape(-1, 1)
+        ys = (xs >= 0.0).astype(float)
+
+        reference_network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            loss_func=LossFunc.cross_entropy,
+            seed=0,
+        )
+        accelerated_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            loss_func=LossFunc.cross_entropy,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+
+        self.assertTrue(
+            np.allclose(
+                predict_dataset(reference_network, xs),
+                predict_dataset_accelerated(accelerated_network, xs),
+                atol=1e-10,
+                rtol=1e-10,
+            )
+        )
+
+        reference_network.fast_backward_pass(xs[0], ys[0], 0.02)
+        accelerated_network.train_batch(xs[:1], ys[:1], 0.02, runtime=AcceleratedRuntime.numpy)
+
+        for reference_weights, accelerated_weights in zip(reference_network.weights, accelerated_network.weights):
+            self.assertTrue(np.allclose(reference_weights, accelerated_weights, atol=1e-10, rtol=1e-10))
+        for reference_biases, accelerated_biases in zip(reference_network.biases, accelerated_network.biases):
+            self.assertTrue(np.allclose(reference_biases, accelerated_biases, atol=1e-10, rtol=1e-10))
+
     @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
     def test_numba_mixed_activations_match_numpy(self):
         activations = (
@@ -303,6 +388,51 @@ class AcceleratedBackendTests(unittest.TestCase):
 
         numpy_predictions = numpy_network.train_batch(xs[:2], ys[:2], 0.02, runtime=AcceleratedRuntime.numpy)
         numba_predictions = numba_network.train_batch(xs[:2], ys[:2], 0.02, runtime=AcceleratedRuntime.numba)
+
+        self.assertTrue(np.allclose(numpy_predictions, numba_predictions, atol=1e-10, rtol=1e-10))
+        for numpy_weights, numba_weights in zip(numpy_network.weights, numba_network.weights):
+            self.assertTrue(np.allclose(numpy_weights, numba_weights, atol=1e-10, rtol=1e-10))
+        for numpy_biases, numba_biases in zip(numpy_network.biases, numba_network.biases):
+            self.assertTrue(np.allclose(numpy_biases, numba_biases, atol=1e-10, rtol=1e-10))
+
+    @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
+    def test_numba_cross_entropy_matches_numpy(self):
+        activations = (
+            ActivationFunc.relu,
+            ActivationFunc.tanh,
+            ActivationFunc.sigmoid,
+        )
+        xs = np.array([[-1.0], [1.0]], dtype=float)
+        ys = np.array([[0.0], [1.0]], dtype=float)
+        numpy_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            loss_func=LossFunc.cross_entropy,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+        numba_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            loss_func=LossFunc.cross_entropy,
+            seed=0,
+            runtime=AcceleratedRuntime.numba,
+        )
+
+        numpy_predictions = numpy_network.train_batch(
+            xs,
+            ys,
+            0.02,
+            runtime=AcceleratedRuntime.numpy,
+        )
+        numba_predictions = numba_network.train_batch(
+            xs,
+            ys,
+            0.02,
+            runtime=AcceleratedRuntime.numba,
+        )
 
         self.assertTrue(np.allclose(numpy_predictions, numba_predictions, atol=1e-10, rtol=1e-10))
         for numpy_weights, numba_weights in zip(numpy_network.weights, numba_network.weights):
