@@ -39,6 +39,13 @@ def _coerce_loss_func(func: LossFunc | str) -> LossFunc:
         raise ValueError(f"Loss function {func} not supported") from exc
 
 
+def _coerce_positive_class_weight(weight: float) -> float:
+    weight = float(weight)
+    if not np.isfinite(weight) or weight <= 0.0:
+        raise ValueError("positive_class_weight must be positive")
+    return weight
+
+
 def _normalize_activation_funcs(
     activation_func: ActivationFunc | str | Sequence[ActivationFunc | str],
     hidden_layer_count: int,
@@ -63,6 +70,7 @@ class FFNNConfig:
     activation_func: ActivationFunc | tuple[ActivationFunc, ...] = ActivationFunc.tanh
     layer_activation_funcs: tuple[ActivationFunc, ...] = (ActivationFunc.tanh,)
     loss_func: LossFunc = LossFunc.mse
+    positive_class_weight: float = 1.0
     output_modifier: OutputModifier | None = None
 
     def __init__(
@@ -72,6 +80,7 @@ class FFNNConfig:
         hidden_layer_shapes: np.ndarray | list[int] | tuple[int, ...] | None = None,
         activation_func: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
         loss_func: LossFunc | str = LossFunc.mse,
+        positive_class_weight: float = 1.0,
         output_modifier: OutputModifier | None = None,
     ):
         self.input_layer_dim = int(input_layer_dim)
@@ -99,6 +108,7 @@ class FFNNConfig:
         else:
             self.activation_func = self.layer_activation_funcs
         self.loss_func = _coerce_loss_func(loss_func)
+        self.positive_class_weight = _coerce_positive_class_weight(positive_class_weight)
         if (
             self.loss_func is LossFunc.cross_entropy
             and self.layer_activation_funcs[-1] is not ActivationFunc.sigmoid
@@ -135,7 +145,23 @@ def _clip_cross_entropy_predictions(predictions: np.ndarray) -> np.ndarray:
     return np.clip(predictions, _LOSS_EPSILON, 1.0 - _LOSS_EPSILON)
 
 
-def get_loss_func(func: LossFunc | str):
+def _cross_entropy_logit_delta(
+    y: np.ndarray,
+    y_hat: np.ndarray,
+    *,
+    positive_class_weight: float = 1.0,
+) -> np.ndarray:
+    y, y_hat = _normalize_loss_arrays(y, y_hat)
+    _validate_cross_entropy_targets(y)
+    _validate_cross_entropy_predictions(y_hat)
+    positive_class_weight = _coerce_positive_class_weight(positive_class_weight)
+    return (
+        ((1.0 - y) * y_hat)
+        - (positive_class_weight * y * (1.0 - y_hat))
+    ) / y.size
+
+
+def get_loss_func(func: LossFunc | str, *, positive_class_weight: float = 1.0):
     func = _coerce_loss_func(func)
     if func is LossFunc.mse:
         def mse(y: np.ndarray, y_hat: np.ndarray):
@@ -143,12 +169,14 @@ def get_loss_func(func: LossFunc | str):
             return np.mean((y - y_hat) ** 2)
         return mse
     if func is LossFunc.cross_entropy:
+        positive_class_weight = _coerce_positive_class_weight(positive_class_weight)
+
         def cross_entropy(y: np.ndarray, y_hat: np.ndarray):
             y, y_hat = _normalize_loss_arrays(y, y_hat)
             _validate_cross_entropy_targets(y)
             clipped_predictions = _clip_cross_entropy_predictions(y_hat)
             return -np.mean(
-                y * np.log(clipped_predictions)
+                positive_class_weight * y * np.log(clipped_predictions)
                 + (1.0 - y) * np.log(1.0 - clipped_predictions)
             )
 
@@ -156,7 +184,11 @@ def get_loss_func(func: LossFunc | str):
     raise ValueError(f"Loss function {func} not supported")
 
 
-def get_loss_func_derivative(func: LossFunc | str):
+def get_loss_func_derivative(
+    func: LossFunc | str,
+    *,
+    positive_class_weight: float = 1.0,
+):
     func = _coerce_loss_func(func)
     if func is LossFunc.mse:
         def mse_derivative(y: np.ndarray, y_hat: np.ndarray):
@@ -165,13 +197,15 @@ def get_loss_func_derivative(func: LossFunc | str):
 
         return mse_derivative
     if func is LossFunc.cross_entropy:
+        positive_class_weight = _coerce_positive_class_weight(positive_class_weight)
+
         def cross_entropy_derivative(y: np.ndarray, y_hat: np.ndarray):
             y, y_hat = _normalize_loss_arrays(y, y_hat)
             _validate_cross_entropy_targets(y)
             clipped_predictions = _clip_cross_entropy_predictions(y_hat)
             return (
                 ((1.0 - y) / (1.0 - clipped_predictions))
-                - (y / clipped_predictions)
+                - ((positive_class_weight * y) / clipped_predictions)
             ) / y.size
 
         return cross_entropy_derivative
@@ -327,16 +361,21 @@ class FFNN():
             raise ValueError("y_actual shape must match the network output shape")
 
         #last layer
-        loss_deriv = get_loss_func_derivative(self.config.loss_func)
+        loss_deriv = get_loss_func_derivative(
+            self.config.loss_func,
+            positive_class_weight=self.config.positive_class_weight,
+        )
 
         deltas = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
         grad_weights = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
         grad_biases = np.empty(self.config.hidden_layer_count, dtype=np.ndarray)
 
         if self.config.loss_func is LossFunc.cross_entropy:
-            _validate_cross_entropy_targets(y_actual)
-            _validate_cross_entropy_predictions(y_pred)
-            deltas[-1] = (y_pred - y_actual) / y_actual.size
+            deltas[-1] = _cross_entropy_logit_delta(
+                y_actual,
+                y_pred,
+                positive_class_weight=self.config.positive_class_weight,
+            )
         else:
             deltas[-1] = (
                 loss_deriv(y_actual, y_pred)

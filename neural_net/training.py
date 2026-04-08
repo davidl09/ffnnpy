@@ -99,6 +99,7 @@ def build_random_network(
     hidden_layer_shapes: tuple[int, ...] = (32, 32, 1),
     activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
     loss_func: LossFunc | str = LossFunc.mse,
+    positive_class_weight: float = 1.0,
     seed: int = 0,
     output_modifier: Callable[[np.ndarray], Any] | None = None,
 ) -> FFNN:
@@ -108,6 +109,7 @@ def build_random_network(
         hidden_layer_shapes=hidden_layer_shapes,
         activation_func=activation,
         loss_func=loss_func,
+        positive_class_weight=positive_class_weight,
         output_modifier=output_modifier,
     )
     network = FFNN(config)
@@ -200,7 +202,10 @@ def fit_dataset(
     milestone_set = set(milestones)
     snapshots: dict[int, np.ndarray] = {}
     losses: dict[int, float] = {}
-    loss_fn = get_loss_func(network.config.loss_func)
+    loss_fn = get_loss_func(
+        network.config.loss_func,
+        positive_class_weight=network.config.positive_class_weight,
+    )
     training_start = time.perf_counter()
 
     if progress_logger is not None:
@@ -270,7 +275,10 @@ def fit_function(
 
     snapshots: dict[int, np.ndarray] = {}
     losses: dict[int, float] = {}
-    loss_fn = get_loss_func(network.config.loss_func)
+    loss_fn = get_loss_func(
+        network.config.loss_func,
+        positive_class_weight=network.config.positive_class_weight,
+    )
     training_start = time.perf_counter()
 
     if progress_logger is not None:
@@ -411,7 +419,7 @@ def _log_milestone(
         f"n={milestone_power:2d} "
         f"updates={step:7d}/{total_steps:7d} "
         f"progress={100 * step / total_steps:6.2f}% "
-        f"eval_mse={loss_value:.6f} "
+        f"eval_loss={loss_value:.6f} "
         f"last_x={np.asarray(x_sample).reshape(-1)[0]:+.3f} "
         f"last_y={np.asarray(y_sample).reshape(-1)[0]:+.3f} "
         f"elapsed={elapsed:7.2f}s "

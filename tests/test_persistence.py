@@ -42,6 +42,7 @@ class PersistenceTests(unittest.TestCase):
                 "sigmoid",
             ),
             loss_func=LossFunc.cross_entropy,
+            positive_class_weight=2.5,
             seed=7,
         )
         training_config = TrainingConfig(
@@ -81,6 +82,10 @@ class PersistenceTests(unittest.TestCase):
             network.config.layer_activation_funcs,
         )
         self.assertIs(loaded_network.config.loss_func, LossFunc.cross_entropy)
+        self.assertEqual(
+            loaded_network.config.positive_class_weight,
+            network.config.positive_class_weight,
+        )
 
         for layer_index in range(network.config.hidden_layer_count):
             self.assertTrue(
@@ -115,6 +120,7 @@ class PersistenceTests(unittest.TestCase):
             hidden_layer_shapes=(5, 2),
             activation=("tanh", "sigmoid"),
             loss_func=LossFunc.cross_entropy,
+            positive_class_weight=3.0,
             seed=3,
             runtime=AcceleratedRuntime.numpy,
         )
@@ -147,6 +153,10 @@ class PersistenceTests(unittest.TestCase):
         loaded_network = artifact.network
         self.assertEqual(loaded_network.runtime, AcceleratedRuntime.numpy)
         self.assertIs(loaded_network.config.loss_func, LossFunc.cross_entropy)
+        self.assertEqual(
+            loaded_network.config.positive_class_weight,
+            network.config.positive_class_weight,
+        )
         self.assertIsNone(loaded_network._numba_weights)
         self.assertIsNone(loaded_network._numba_biases)
 
@@ -230,6 +240,33 @@ class PersistenceTests(unittest.TestCase):
         self.assertIs(artifact.network.output_modifier, _boolean_threshold)
         self.assertEqual(outputs.dtype, np.bool_)
         self.assertTrue(np.all(outputs))
+
+    def test_load_legacy_network_defaults_positive_class_weight_to_one(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "legacy.ffnnpy"
+            self._write_archive(
+                path,
+                metadata={
+                    "format_version": 1,
+                    "backend": "reference",
+                    "network": {
+                        "input_layer_dim": 1,
+                        "hidden_layer_shapes": [1],
+                        "layer_activation_funcs": ["sigmoid"],
+                        "loss_func": "cross_entropy",
+                    },
+                    "output_modifier_name": None,
+                    "training_config": None,
+                },
+                weights_0=np.array([[1.0]], dtype=float),
+                biases_0=np.array([0.0], dtype=float),
+            )
+
+            artifact = load_network(path)
+
+        self.assertEqual(artifact.backend, "reference")
+        self.assertIs(artifact.network.config.loss_func, LossFunc.cross_entropy)
+        self.assertEqual(artifact.network.config.positive_class_weight, 1.0)
 
     def test_unregistered_output_modifier_is_rejected_on_save(self):
         network = build_random_network(

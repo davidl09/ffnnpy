@@ -22,10 +22,40 @@ from neural_net import (
     predict_dataset,
     predict_dataset_accelerated,
 )
-from neural_net.backend import get_loss_func
+from neural_net.backend import get_loss_func, get_loss_func_derivative
 
 
 HAS_NUMBA = importlib.util.find_spec("numba") is not None
+
+
+def _manual_weighted_cross_entropy(
+    targets: np.ndarray,
+    predictions: np.ndarray,
+    *,
+    positive_class_weight: float,
+) -> float:
+    targets = np.asarray(targets, dtype=float).reshape(-1)
+    predictions = np.asarray(predictions, dtype=float).reshape(-1)
+    return float(
+        -np.mean(
+            positive_class_weight * targets * np.log(predictions)
+            + (1.0 - targets) * np.log(1.0 - predictions)
+        )
+    )
+
+
+def _manual_weighted_cross_entropy_derivative(
+    targets: np.ndarray,
+    predictions: np.ndarray,
+    *,
+    positive_class_weight: float,
+) -> np.ndarray:
+    targets = np.asarray(targets, dtype=float).reshape(-1)
+    predictions = np.asarray(predictions, dtype=float).reshape(-1)
+    return (
+        ((1.0 - targets) / (1.0 - predictions))
+        - ((positive_class_weight * targets) / predictions)
+    ) / targets.size
 
 
 class AcceleratedBackendTests(unittest.TestCase):
@@ -61,12 +91,23 @@ class AcceleratedBackendTests(unittest.TestCase):
                 loss_func=LossFunc.cross_entropy,
             )
 
+    def test_config_rejects_non_positive_positive_class_weight(self):
+        with self.assertRaisesRegex(ValueError, "positive_class_weight"):
+            FFNNConfig(
+                input_layer_dim=1,
+                hidden_layer_count=1,
+                hidden_layer_shapes=(1,),
+                activation_func=ActivationFunc.sigmoid,
+                positive_class_weight=0.0,
+            )
+
     def test_builders_expose_public_loss_selection(self):
         reference_network = build_random_network(
             input_layer_dim=1,
             hidden_layer_shapes=(4, 1),
             activation=(ActivationFunc.tanh, ActivationFunc.sigmoid),
             loss_func="cross_entropy",
+            positive_class_weight=3.5,
             seed=0,
         )
         accelerated_network = build_accelerated_network(
@@ -74,24 +115,56 @@ class AcceleratedBackendTests(unittest.TestCase):
             hidden_layer_shapes=(4, 1),
             activation=(ActivationFunc.tanh, ActivationFunc.sigmoid),
             loss_func=LossFunc.cross_entropy,
+            positive_class_weight=3.5,
             seed=0,
             runtime=AcceleratedRuntime.numpy,
         )
 
         self.assertIs(reference_network.config.loss_func, LossFunc.cross_entropy)
         self.assertIs(accelerated_network.config.loss_func, LossFunc.cross_entropy)
+        self.assertEqual(reference_network.config.positive_class_weight, 3.5)
+        self.assertEqual(accelerated_network.config.positive_class_weight, 3.5)
 
-    def test_cross_entropy_loss_matches_manual_formula(self):
+    def test_weighted_cross_entropy_loss_matches_manual_formula(self):
         targets = np.array([[1.0], [0.0], [1.0]], dtype=float)
         predictions = np.array([[0.9], [0.2], [0.8]], dtype=float)
-        expected = -np.mean(
-            targets.reshape(-1) * np.log(predictions.reshape(-1))
-            + (1.0 - targets.reshape(-1)) * np.log(1.0 - predictions.reshape(-1))
+        positive_class_weight = 2.75
+        expected = _manual_weighted_cross_entropy(
+            targets,
+            predictions,
+            positive_class_weight=positive_class_weight,
         )
 
-        loss_fn = get_loss_func(LossFunc.cross_entropy)
+        loss_fn = get_loss_func(
+            LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
+        )
 
         self.assertAlmostEqual(float(loss_fn(targets, predictions)), float(expected), places=12)
+
+    def test_weighted_cross_entropy_derivative_matches_manual_formula(self):
+        targets = np.array([[1.0], [0.0], [1.0]], dtype=float)
+        predictions = np.array([[0.9], [0.2], [0.8]], dtype=float)
+        positive_class_weight = 2.75
+        expected = _manual_weighted_cross_entropy_derivative(
+            targets,
+            predictions,
+            positive_class_weight=positive_class_weight,
+        )
+
+        derivative_fn = get_loss_func_derivative(
+            LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
+        )
+
+        self.assertTrue(
+            np.allclose(
+                derivative_fn(targets, predictions),
+                expected,
+                atol=1e-12,
+                rtol=1e-12,
+            )
+        )
 
     def test_forward_batch_shape(self):
         network = build_accelerated_network(
@@ -463,7 +536,7 @@ class AcceleratedBackendTests(unittest.TestCase):
         for reference_biases, accelerated_biases in zip(reference_network.biases, accelerated_network.biases):
             self.assertTrue(np.allclose(reference_biases, accelerated_biases, atol=1e-10, rtol=1e-10))
 
-    def test_reference_and_accelerated_match_with_cross_entropy(self):
+    def test_reference_and_accelerated_match_with_weighted_cross_entropy(self):
         activations = (
             ActivationFunc.relu,
             ActivationFunc.tanh,
@@ -471,12 +544,14 @@ class AcceleratedBackendTests(unittest.TestCase):
         )
         xs = np.linspace(-1.0, 1.0, 16, dtype=float).reshape(-1, 1)
         ys = (xs >= 0.0).astype(float)
+        positive_class_weight = 2.5
 
         reference_network = build_random_network(
             input_layer_dim=1,
             hidden_layer_shapes=(8, 8, 1),
             activation=activations,
             loss_func=LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
             seed=0,
         )
         accelerated_network = build_accelerated_network(
@@ -484,6 +559,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             hidden_layer_shapes=(8, 8, 1),
             activation=activations,
             loss_func=LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
             seed=0,
             runtime=AcceleratedRuntime.numpy,
         )
@@ -504,6 +580,98 @@ class AcceleratedBackendTests(unittest.TestCase):
             self.assertTrue(np.allclose(reference_weights, accelerated_weights, atol=1e-10, rtol=1e-10))
         for reference_biases, accelerated_biases in zip(reference_network.biases, accelerated_network.biases):
             self.assertTrue(np.allclose(reference_biases, accelerated_biases, atol=1e-10, rtol=1e-10))
+
+    def test_weighted_cross_entropy_milestone_losses_match_reference_accelerated_and_manual_eval(self):
+        activations = (
+            ActivationFunc.relu,
+            ActivationFunc.tanh,
+            ActivationFunc.sigmoid,
+        )
+        xs = np.linspace(-1.0, 1.0, 32, dtype=float).reshape(-1, 1)
+        ys = (xs >= 0.0).astype(float)
+        positive_class_weight = 2.5
+        loss_fn = get_loss_func(
+            LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
+        )
+
+        reference_network = build_random_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            loss_func=LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
+            seed=0,
+        )
+        accelerated_network = build_accelerated_network(
+            input_layer_dim=1,
+            hidden_layer_shapes=(8, 8, 1),
+            activation=activations,
+            loss_func=LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
+            seed=0,
+            runtime=AcceleratedRuntime.numpy,
+        )
+
+        reference_result = fit_dataset(
+            reference_network,
+            xs,
+            ys,
+            config=TrainingConfig(
+                learning_rate=0.02,
+                max_power=5,
+                evaluation_points=32,
+                seed=0,
+            ),
+            evaluation_inputs=xs,
+            evaluation_targets=ys,
+        )
+        accelerated_result = fit_dataset_accelerated(
+            accelerated_network,
+            xs,
+            ys,
+            config=AcceleratedTrainingConfig(
+                learning_rate=0.02,
+                max_power=5,
+                evaluation_points=32,
+                seed=0,
+                batch_size=1,
+                runtime=AcceleratedRuntime.numpy,
+            ),
+            evaluation_inputs=xs,
+            evaluation_targets=ys,
+        )
+
+        reference_last_step = reference_result.milestone_steps[-1]
+        accelerated_last_step = accelerated_result.milestone_steps[-1]
+        reference_expected_loss = float(
+            loss_fn(
+                reference_result.evaluation_targets,
+                reference_result.snapshots[reference_last_step],
+            )
+        )
+        accelerated_expected_loss = float(
+            loss_fn(
+                accelerated_result.evaluation_targets,
+                accelerated_result.snapshots[accelerated_last_step],
+            )
+        )
+
+        self.assertAlmostEqual(
+            reference_result.losses[reference_last_step],
+            reference_expected_loss,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            accelerated_result.losses[accelerated_last_step],
+            accelerated_expected_loss,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            reference_result.losses[reference_last_step],
+            accelerated_result.losses[accelerated_last_step],
+            places=10,
+        )
 
     @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
     def test_numba_mixed_activations_match_numpy(self):
@@ -548,7 +716,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             self.assertTrue(np.allclose(numpy_biases, numba_biases, atol=1e-10, rtol=1e-10))
 
     @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
-    def test_numba_cross_entropy_matches_numpy(self):
+    def test_numba_weighted_cross_entropy_matches_numpy(self):
         activations = (
             ActivationFunc.relu,
             ActivationFunc.tanh,
@@ -556,11 +724,13 @@ class AcceleratedBackendTests(unittest.TestCase):
         )
         xs = np.array([[-1.0], [1.0]], dtype=float)
         ys = np.array([[0.0], [1.0]], dtype=float)
+        positive_class_weight = 2.5
         numpy_network = build_accelerated_network(
             input_layer_dim=1,
             hidden_layer_shapes=(8, 8, 1),
             activation=activations,
             loss_func=LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
             seed=0,
             runtime=AcceleratedRuntime.numpy,
         )
@@ -569,6 +739,7 @@ class AcceleratedBackendTests(unittest.TestCase):
             hidden_layer_shapes=(8, 8, 1),
             activation=activations,
             loss_func=LossFunc.cross_entropy,
+            positive_class_weight=positive_class_weight,
             seed=0,
             runtime=AcceleratedRuntime.numba,
         )

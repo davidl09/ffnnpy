@@ -167,6 +167,7 @@ def _serialize_network_config(network: FFNN | AcceleratedFFNN) -> dict[str, Any]
             activation.value for activation in network.config.layer_activation_funcs
         ],
         "loss_func": loss_func.value,
+        "positive_class_weight": float(network.config.positive_class_weight),
     }
 
     if isinstance(network, AcceleratedFFNN):
@@ -240,6 +241,7 @@ def _deserialize_network_config(metadata: dict[str, Any]) -> FFNNConfig:
             ActivationFunc(name) for name in metadata["layer_activation_funcs"]
         )
         loss_func = LossFunc(metadata["loss_func"])
+        positive_class_weight = float(metadata.get("positive_class_weight", 1.0))
     except KeyError as exc:
         raise ValueError(f"network metadata is missing '{exc.args[0]}'") from exc
     except (TypeError, ValueError) as exc:
@@ -262,6 +264,7 @@ def _deserialize_network_config(metadata: dict[str, Any]) -> FFNNConfig:
         hidden_layer_shapes=hidden_layer_shapes,
         activation_func=layer_activation_funcs,
         loss_func=loss_func,
+        positive_class_weight=positive_class_weight,
     )
 
 

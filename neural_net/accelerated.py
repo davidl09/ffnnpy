@@ -232,6 +232,7 @@ class AcceleratedFFNN:
                 float(learning_rate),
                 self.activation_codes,
                 self.loss_code,
+                float(self.config.positive_class_weight),
             )
         else:
             predictions, pre_activations, values = _train_batch_numpy(
@@ -242,6 +243,7 @@ class AcceleratedFFNN:
                 float(learning_rate),
                 self.config.layer_activation_funcs,
                 self.config.loss_func,
+                self.config.positive_class_weight,
             )
             self.pre_activations = pre_activations
             self.values = values
@@ -295,6 +297,7 @@ def build_accelerated_network(
     hidden_layer_shapes: tuple[int, ...] = (32, 32, 1),
     activation: ActivationFunc | str | Sequence[ActivationFunc | str] = ActivationFunc.tanh,
     loss_func: LossFunc | str = LossFunc.mse,
+    positive_class_weight: float = 1.0,
     seed: int = 0,
     runtime: AcceleratedRuntime = AcceleratedRuntime.auto,
     output_modifier: Callable[[np.ndarray], Any] | None = None,
@@ -305,6 +308,7 @@ def build_accelerated_network(
         hidden_layer_shapes=hidden_layer_shapes,
         activation_func=activation,
         loss_func=loss_func,
+        positive_class_weight=positive_class_weight,
         output_modifier=output_modifier,
     )
     network = AcceleratedFFNN(config, runtime=runtime)
@@ -391,7 +395,10 @@ def fit_dataset_accelerated(
     milestone_set = set(milestones)
     snapshots: dict[int, np.ndarray] = {}
     losses: dict[int, float] = {}
-    loss_fn = get_loss_func(network.config.loss_func)
+    loss_fn = get_loss_func(
+        network.config.loss_func,
+        positive_class_weight=network.config.positive_class_weight,
+    )
     training_start = time.perf_counter()
     resolved_runtime = network.resolve_runtime(config.runtime)
 
@@ -466,7 +473,10 @@ def fit_function_accelerated(
 
     snapshots: dict[int, np.ndarray] = {}
     losses: dict[int, float] = {}
-    loss_fn = get_loss_func(network.config.loss_func)
+    loss_fn = get_loss_func(
+        network.config.loss_func,
+        positive_class_weight=network.config.positive_class_weight,
+    )
     training_start = time.perf_counter()
     resolved_runtime = network.resolve_runtime(config.runtime)
 
@@ -557,13 +567,17 @@ def _output_delta_numpy(
     output_activation: ActivationFunc,
     activated_output: np.ndarray,
     pre_activated_output: np.ndarray,
+    positive_class_weight: float,
 ) -> np.ndarray:
     scale = float(targets.size)
     if loss_func is LossFunc.cross_entropy:
         if output_activation is not ActivationFunc.sigmoid:
             raise ValueError("cross_entropy loss requires a sigmoid output activation")
         _validate_cross_entropy_predictions_numpy(predictions)
-        return (predictions - targets) / scale
+        return (
+            ((1.0 - targets) * predictions)
+            - (positive_class_weight * targets * (1.0 - predictions))
+        ) / scale
 
     return (
         (2.0 * (predictions - targets) / scale)
@@ -610,6 +624,7 @@ def _train_batch_numpy(
     learning_rate: float,
     layer_activation_funcs: Sequence[ActivationFunc],
     loss_func: LossFunc,
+    positive_class_weight: float,
 ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
     layer_inputs: list[np.ndarray] = [inputs]
     pre_activations: list[np.ndarray] = []
@@ -637,6 +652,7 @@ def _train_batch_numpy(
         layer_activation_funcs[-1],
         layer_outputs[-1],
         pre_activations[-1],
+        positive_class_weight,
     )
 
     for layer_index in range(len(weights) - 2, -1, -1):
@@ -736,6 +752,7 @@ if njit is not None:
         learning_rate: float,
         activation_codes: np.ndarray,
         loss_code: int,
+        positive_class_weight: float,
     ) -> np.ndarray:
         layer_inputs = NumbaList()
         pre_activations = NumbaList()
@@ -756,7 +773,10 @@ if njit is not None:
             deltas.append(np.zeros_like(pre_activations[layer_index]))
 
         if loss_code == _LOSS_CROSS_ENTROPY:
-            deltas[-1] = (predictions - targets) / targets.size
+            deltas[-1] = (
+                ((1.0 - targets) * predictions)
+                - (positive_class_weight * targets * (1.0 - predictions))
+            ) / targets.size
         else:
             deltas[-1] = (
                 (2.0 * (predictions - targets) / targets.size)
